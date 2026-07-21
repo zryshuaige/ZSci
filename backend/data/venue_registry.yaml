@@ -1,0 +1,125 @@
+# Top-venue registry (design.md §6.2)
+# Add or edit entries freely; aliases are matched case-insensitively as substrings.
+venues:
+  - id: cvpr
+    name: CVPR
+    aliases:
+      - IEEE/CVF Conference on Computer Vision and Pattern Recognition
+      - Computer Vision and Pattern Recognition
+    field: computer_vision
+    level: top_conference
+
+  - id: iccv
+    name: ICCV
+    aliases:
+      - International Conference on Computer Vision
+    field: computer_vision
+    level: top_conference
+
+  - id: eccv
+    name: ECCV
+    aliases:
+      - European Conference on Computer Vision
+    field: computer_vision
+    level: top_conference
+
+  - id: wacv
+    name: WACV
+    aliases:
+      - Winter Conference on Applications of Computer Vision
+    field: computer_vision
+    level: conference
+
+  - id: neurips
+    name: NeurIPS
+    aliases:
+      - Neural Information Processing Systems
+      - NIPS
+      - Conference on Neural Information Processing Systems
+    field: machine_learning
+    level: top_conference
+
+  - id: icml
+    name: ICML
+    aliases:
+      - International Conference on Machine Learning
+    field: machine_learning
+    level: top_conference
+
+  - id: iclr
+    name: ICLR
+    aliases:
+      - International Conference on Learning Representations
+    field: machine_learning
+    level: top_conference
+
+  - id: aaai
+    name: AAAI
+    aliases:
+      - AAAI Conference on Artificial Intelligence
+      - Association for the Advancement of Artificial Intelligence
+    field: artificial_intelligence
+    level: top_conference
+
+  - id: ijcai
+    name: IJCAI
+    aliases:
+      - International Joint Conference on Artificial Intelligence
+    field: artificial_intelligence
+    level: top_conference
+
+  - id: acl
+    name: ACL
+    aliases:
+      - Annual Meeting of the Association for Computational Linguistics
+    field: nlp
+    level: top_conference
+
+  - id: emnlp
+    name: EMNLP
+    aliases:
+      - Conference on Empirical Methods in Natural Language Processing
+    field: nlp
+    level: top_conference
+
+  - id: naacl
+    name: NAACL
+    aliases:
+      - Conference of the North American Chapter of the Association for Computational Linguistics
+    field: nlp
+    level: conference
+
+  - id: cvf
+    name: CVF
+    aliases:
+      - CVF Open Access
+    field: computer_vision
+    level: other
+
+  - id: tpami
+    name: TPAMI
+    aliases:
+      - IEEE Transactions on Pattern Analysis and Machine Intelligence
+    field: computer_vision
+    level: top_journal
+
+  - id: ijcv
+    name: IJCV
+    aliases:
+      - International Journal of Computer Vision
+    field: computer_vision
+    level: top_journal
+
+  - id: jmlr
+    name: JMLR
+    aliases:
+      - Journal of Machine Learning Research
+    field: machine_learning
+    level: top_journal
+
+  - id: tmlr
+    name: TMLR
+    aliases:
+      - Transactions on Machine Learning Research
+    field: machine_learning
+    level: journal

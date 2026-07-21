@@ -1,0 +1,46 @@
+# --- Python / uv ---
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.python-version
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# --- Node / Vite ---
+node_modules/
+dist/
+dist-ssr/
+*.local
+.vite/
+*.log
+
+# tsc -b build artifacts (must not shadow vite.config.ts)
+vite.config.js
+vite.config.d.ts
+*.tsbuildinfo
+
+# --- ZSci workspace (local data, never commit) ---
+workspace/
+!workspace/.gitkeep
+
+# --- IDE / OS ---
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*.swo
+
+# --- Secrets ---
+.env
+.env.*
+!.env.example
+*.key
+
+
+.claude/
+.agents/
+

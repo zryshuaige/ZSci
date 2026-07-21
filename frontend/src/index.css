@@ -1,0 +1,178 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ============================================================
+   Z-Sci design tokens & motion system
+   (apple-design + improve-animations: GPU-only, sub-300ms,
+    reduced-motion / reduced-transparency / hover-gated)
+   ============================================================ */
+
+:root {
+  /* Easing — strong custom curves, never bare ease-in on UI */
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1); /* entries: fast-in slow-out */
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1); /* symmetric A<->B */
+  --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1); /* sheets / drawers */
+  /* Durations — UI stays under 300ms */
+  --dur-press: 160ms; /* :active feedback */
+  --dur-sm: 200ms; /* tooltips, small popovers, cards */
+  --dur-md: 250ms; /* dropdowns, route transitions */
+  --dur-lg: 300ms; /* modals, drawers (ceiling) */
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", Roboto, Helvetica, Arial, sans-serif;
+  font-optical-sizing: auto;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  @apply bg-muted/40 text-foreground;
+}
+
+/* Typography — size-specific tracking/leading (apple-design §15).
+   Large display text wants negative tracking; body stays near 0. */
+h1,
+h2,
+h3 {
+  line-height: 1.15;
+  letter-spacing: -0.01em;
+}
+h1 {
+  letter-spacing: -0.02em;
+}
+
+/* ============================================================
+   PDF.js text layer
+   The full pdf_viewer.css is ~3200 lines of editor UI we don't
+   ship. But the text-layer rules are mandatory: without them the
+   <span>s PDF.js emits are visible inline text that piles up at
+   the page origin, so the parsed text overlaps the canvas glyphs
+   (issue: "解析后的文本显示在页面底部，字混在一起"). Vendor only
+   what the selection layer needs. --scale-factor is set inline on
+   each .textLayer container by PdfReader to match the render scale.
+   ============================================================ */
+.textLayer {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  line-height: 1;
+  text-align: initial;
+  text-size-adjust: none;
+  -webkit-text-size-adjust: none;
+  forced-color-adjust: none;
+  transform-origin: 0 0;
+  z-index: 0;
+  opacity: 1;
+}
+.textLayer :is(span, br) {
+  color: transparent; /* canvas paints the glyphs; spans only carry text for selection */
+  position: absolute;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0% 0%;
+}
+.textLayer span.markedContent {
+  top: 0;
+  height: 0;
+}
+.textLayer span[role="img"] {
+  -webkit-user-select: none;
+  user-select: none;
+  cursor: default;
+}
+/* endOfContent lets the browser extend a drag-selection past the
+   last line, matching native PDF.js behaviour. */
+.textLayer .endOfContent {
+  display: block;
+  position: absolute;
+  inset: 100% 0 0;
+  z-index: 0;
+  cursor: default;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.textLayer.selecting .endOfContent {
+  top: 0;
+  height: 100%;
+}
+.textLayer ::selection {
+  background: hsl(48 96% 70% / 0.5);
+}
+
+/* ============================================================
+   Translucent chrome (apple-design §12)
+   Bigger surfaces read as thicker: glass-strong has heavier blur.
+   Never stack light translucent on light translucent.
+   ============================================================ */
+.glass {
+  background: rgba(255, 255, 255, 0.72);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+}
+.glass-strong {
+  background: rgba(255, 255, 255, 0.85);
+  backdrop-filter: blur(28px) saturate(180%);
+  -webkit-backdrop-filter: blur(28px) saturate(180%);
+}
+/* Scroll-edge fade: replaces hard 1px dividers under floating chrome.
+   Only where floating UI actually overlaps content. */
+.scroll-edge-bottom {
+  -webkit-mask-image: linear-gradient(to bottom, black calc(100% - 24px), transparent);
+  mask-image: linear-gradient(to bottom, black calc(100% - 24px), transparent);
+}
+
+/* ============================================================
+   Streaming caret for trajectory / typing streams.
+   Uses the zsci-caret keyframe defined in tailwind.config.ts.
+   ============================================================ */
+@layer utilities {
+  .caret-blink::after {
+    content: "▍";
+    margin-left: 1px;
+    animation: zsci-caret 1s steps(1) infinite;
+    color: currentColor;
+    opacity: 0.6;
+  }
+}
+
+/* Hover lift — gated behind precise pointer (apple-design §14).
+   No hover effects on touch, where sticky :hover would trap. */
+@media (hover: hover) and (pointer: fine) {
+  .hover-lift {
+    transition: transform var(--dur-sm) var(--ease-out),
+      box-shadow var(--dur-sm) var(--ease-out);
+  }
+  .hover-lift:hover {
+    transform: translateY(-1px);
+  }
+}
+
+/* ============================================================
+   Accessibility — three independent signals (apple-design §14).
+   Reduced motion != no feedback: keep opacity/color, drop movement.
+   ============================================================ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+@media (prefers-reduced-transparency: reduce) {
+  .glass,
+  .glass-strong {
+    background: #ffffff !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+  }
+}
