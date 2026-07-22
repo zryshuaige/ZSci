@@ -176,7 +176,29 @@ def approve_task(task_id: str, payload: ApprovalDecision, db: Session = Depends(
         task.input_json = json.dumps(inp, ensure_ascii=False)
         task.status = "running"
         db.flush()
-        task = run_task(db, task)
+        try:
+            task = run_task(db, task)
+        except ModelNotConfigured as exc:
+            # run_task already persisted "failed" (flush, not commit); commit it
+            # so the status survives. Without this handler (which create_and_run_task
+            # has), the exception propagated, get_db rolled back the "failed" flush,
+            # and the task stayed stuck in "running" - unrecoverable, no pending
+            # approval to re-approve.
+            db.commit()
+            raise HTTPException(503, str(exc)) from exc
+        except GatewayError as exc:
+            db.commit()
+            raise HTTPException(502, str(exc)) from exc
+        except ValueError as exc:
+            db.rollback()
+            raise HTTPException(400, str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("agent task %s (re-run after approval) failed unexpectedly", task.task_type)
+            try:
+                db.commit()
+            except Exception:  # noqa: BLE001
+                db.rollback()
+            raise HTTPException(500, f"Agent task failed: {exc}") from exc
     else:
         task.status = "rejected"
     db.commit()

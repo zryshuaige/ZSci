@@ -198,19 +198,33 @@ async def download_paper_pdf(
     # (M23: previously references.bib was empty and compile failed).
     _append_to_references_bib(project_slug, paper)
 
-    # paper_files record
+    # paper_files record. Upsert by the deterministic PK `pf_<paper_id>` so a
+    # re-download refreshes sha256/size/path (previously the existing row kept
+    # the OLD sha256, flagging the freshly-written file as a tamper mismatch),
+    # and a concurrent double-download doesn't raise IntegrityError -> 500.
+    rel = str(pdf_path.relative_to(get_settings().projects_root))
     existing = db.query(PaperFile).filter_by(paper_id=paper.id, file_type="pdf").first()
     if existing is None:
-        db.add(
-            PaperFile(
-                id=f"pf_{paper.id}",
-                paper_id=paper.id,
-                file_type="pdf",
-                relative_path=str(pdf_path.relative_to(get_settings().projects_root)),
-                sha256=sha,
-                file_size=len(content),
-            )
-        )
+        from sqlalchemy.exc import IntegrityError
+
+        try:
+            with db.begin_nested():
+                db.add(
+                    PaperFile(
+                        id=f"pf_{paper.id}",
+                        paper_id=paper.id,
+                        file_type="pdf",
+                        relative_path=rel,
+                        sha256=sha,
+                        file_size=len(content),
+                    )
+                )
+        except IntegrityError:
+            existing = db.query(PaperFile).filter_by(paper_id=paper.id, file_type="pdf").first()
+    if existing is not None:
+        existing.relative_path = rel
+        existing.sha256 = sha
+        existing.file_size = len(content)
 
     audit(
         db,
@@ -226,8 +240,12 @@ async def download_paper_pdf(
 def _append_to_references_bib(project_slug: str, paper: Paper) -> None:
     """Append the paper's bibtex entry to writing/paper/references.bib.
 
-    Idempotent: skips if the cite_key is already present (M23).
+    Idempotent: skips if the cite_key is already present (M23). The
+    read-check-write is guarded by an exclusive file lock so concurrent
+    downloads (e.g. multiple workers) don't clobber each other's entry.
     """
+    import fcntl
+
     from app.pdf.bib import _cite_key
 
     settings = get_settings()
@@ -236,17 +254,23 @@ def _append_to_references_bib(project_slug: str, paper: Paper) -> None:
     if not writing_root.exists():
         return
     bib_path = writing_root / "references.bib"
+    lock_path = writing_root / ".references.bib.lock"
     cite_key = _cite_key(paper)
-    existing = ""
-    if bib_path.exists():
-        existing = bib_path.read_text(encoding="utf-8", errors="replace")
-    # Check whether the entry is already present by looking for the cite_key
-    # token at the start of an entry: e.g. `@inproceedings{KEY,`.
-    if cite_key and f"{{{cite_key}," in existing:
-        return  # already present
     entry = to_bibtex(paper)
-    new_content = (existing.rstrip() + "\n\n" + entry) if existing.strip() else entry
-    bib_path.write_text(new_content, encoding="utf-8")
+    with open(lock_path, "w", encoding="utf-8") as lockf:
+        fcntl.flock(lockf, fcntl.LOCK_EX)
+        try:
+            existing = ""
+            if bib_path.exists():
+                existing = bib_path.read_text(encoding="utf-8", errors="replace")
+            # Check whether the entry is already present by looking for the
+            # cite_key token at the start of an entry: e.g. `@inproceedings{KEY,`.
+            if cite_key and f"{{{cite_key}," in existing:
+                return  # already present
+            new_content = (existing.rstrip() + "\n\n" + entry) if existing.strip() else entry
+            bib_path.write_text(new_content, encoding="utf-8")
+        finally:
+            fcntl.flock(lockf, fcntl.LOCK_UN)
 
 
 async def import_local_pdf(

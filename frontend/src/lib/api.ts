@@ -215,6 +215,22 @@ export interface Metric {
   created_at: string;
 }
 
+export interface Benchmark {
+  id: string;
+  project_id: string;
+  experiment_id: string | null;
+  name: string;
+  kind: string; // "dataset" | "task" | "sota"
+  source: string; // "paperswithcode" | "hf"
+  url: string | null;
+  task_name: string | null;
+  dataset_name: string | null;
+  metric_name: string | null;
+  metric_value: number | null;
+  paper_id: string | null;
+  created_at: string;
+}
+
 // --- Projects ---
 export const api = {
   listProjects: () => request<Project[]>("/projects"),
@@ -356,6 +372,32 @@ export const api = {
   getRunMetrics: (runId: string) => request<Metric[]>(`/runs/${runId}/metrics`),
   stopRun: (runId: string) => request<{ stopped: boolean }>(`/runs/${runId}/stop`, { method: "POST" }),
   runStreamUrl: (runId: string) => `${BASE}/runs/${runId}/stream`,
+
+  // --- Phase A: benchmarks (dataset/task/SOTA discovery) ---
+  searchBenchmarks: (
+    projectId: string,
+    body: { query: string; experiment_id?: string; limit?: number }
+  ) =>
+    request<Benchmark[]>(`/projects/${projectId}/benchmarks`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  listBenchmarks: (projectId: string) =>
+    request<Benchmark[]>(`/projects/${projectId}/benchmarks`),
+  startAutonomous: (
+    expId: string,
+    body: { selected_papers?: string[]; selected_repositories?: string[]; run_configs?: string[] }
+  ) =>
+    request<{ task_id: string; experiment_id: string }>(`/experiments/${expId}/autonomous`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  listExperimentFiles: (expId: string) =>
+    request<{ files: string[] }>(`/experiments/${expId}/files`),
+  getExperimentFile: (expId: string, path: string) =>
+    request<{ path: string; content: string }>(
+      `/experiments/${expId}/file?path=${encodeURIComponent(path)}`
+    ),
 
   // --- Phase 4: writing ---
   initWriting: (projectId: string, template: string = "generic", force: boolean = false) =>

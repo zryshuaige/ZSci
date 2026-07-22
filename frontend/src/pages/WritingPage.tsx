@@ -43,9 +43,14 @@ export default function WritingPage() {
     enabled: !!currentPath,
   });
 
+  // Load file content into the editor only when the PATH changes (switching
+  // files), not on every query refetch. The old `[fileQuery.data]` dep also
+  // fired after a save -> refetch, clobbering any characters the user typed
+  // between save and refetch completion with the just-saved (stale) content.
   useEffect(() => {
     if (fileQuery.data) setContent(fileQuery.data.content);
-  }, [fileQuery.data]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentPath]);
 
   // Infer the active template from main.tex's \documentclass so the "switch
   // template" control shows the current selection. Falls back to "generic".

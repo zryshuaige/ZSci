@@ -50,6 +50,16 @@ def test_dedup_by_normalized_title():
     assert len(out) == 1
 
 
+def test_dedup_arxiv_id_across_different_dois():
+    # OpenAlex returns the publisher DOI; arXiv returns the arXiv DOI. Same
+    # paper (shared arxiv_id), different DOIs - must still dedup (audit fix).
+    a = _paper("Attention Paper", doi="10.1000/pub.2024.001", arxiv_id="2401.00001", cited=10)
+    b = _paper("Attention Paper", doi="10.48550/arxiv.2401.00001", arxiv_id="2401.00001", cited=0)
+    out = deduplicate([a, b])
+    assert len(out) == 1
+    assert out[0].cited_by_count == 10  # richer entry wins
+
+
 def test_venue_tagging():
     p = _paper("X", venue="IEEE/CVF Conference on Computer Vision and Pattern Recognition")
     out = merge_and_tag([p])

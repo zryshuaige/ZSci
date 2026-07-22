@@ -99,6 +99,10 @@ def put_file(
     Pydantic model with max_length to prevent runaway writes.
     """
     project = _project(db, project_id)
+    if not body.content:
+        # Refuse to write empty content: an editor that saves before loading
+        # would otherwise silently wipe a section file (M9 follow-up).
+        raise HTTPException(400, "Refusing to write empty content (would wipe the file).")
     ok = write_tex_file(project.slug, path, body.content)
     if not ok:
         raise HTTPException(400, "Invalid path")

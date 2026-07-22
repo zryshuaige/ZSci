@@ -231,28 +231,41 @@ def compile_latex(project_slug: str) -> dict:
     out_dir = root / "output"
     out_dir.mkdir(exist_ok=True)
     cmd = ["latexmk", "-pdf", "-interaction=nonstopmode", "-output-directory=" + str(out_dir), str(main)]
-    try:
-        # L19: start a new session so we can kill the whole process group on
-        # timeout (latexmk spawns pdflatex/bibtex/makeindex as children).
-        proc = subprocess.run(
-            cmd,
-            cwd=str(root),
-            capture_output=True,
-            text=True,
-            timeout=120,
-            start_new_session=True,
-        )
-    except subprocess.TimeoutExpired:
-        # Kill any orphaned children that still hold locks on output/main.pdf.
-        import os
-        import signal
+    import os
+    import signal
 
+    # L19: start a new session so we can kill the whole process group on
+    # timeout (latexmk spawns pdflatex/bibtex/makeindex as children). We use
+    # Popen + communicate instead of subprocess.run so `proc` is always bound
+    # and we can reach the child's process group on timeout. subprocess.run
+    # raises TimeoutExpired before assigning its internal proc, so the old
+    # `proc.pid` reference was an UnboundLocalError; and a naive `proc = None`
+    # pre-assignment would fall back to os.getpgid(0) == the SERVER's own
+    # process group and kill the FastAPI process itself.
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(root),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=120)
+    except subprocess.TimeoutExpired:
+        # Kill the whole group (latexmk + children) so they don't keep locks on
+        # output/main.pdf. proc.pid is the session leader, so getpgid(proc.pid)
+        # is the new group - never the server's.
         try:
-            os.killpg(os.getpgid(proc.pid if hasattr(proc, "pid") else 0), signal.SIGTERM)  # type: ignore[arg-type]
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
         except (ProcessLookupError, PermissionError, OSError):
             pass
+        try:
+            proc.communicate(timeout=5)  # reap the killed process
+        except Exception:  # noqa: BLE001
+            pass
         return {"ok": False, "error": "Compilation timed out (>120s)."}
-    log = proc.stdout + "\n" + proc.stderr
+    log = stdout + "\n" + stderr
     pdf = out_dir / "main.pdf"
     if proc.returncode == 0 and pdf.exists():
         return {"ok": True, "pdf_path": str(pdf), "log": log[-4000:]}

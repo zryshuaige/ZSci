@@ -267,7 +267,7 @@ export default function PaperReaderPage() {
             {tab === "metadata" && (
               <Card className="p-3 text-sm space-y-1">
                 <div className="font-medium">{paper.title}</div>
-                <div className="text-muted-foreground">{paper.authors.join(", ")}</div>
+                <div className="text-muted-foreground">{(paper.authors || []).join(", ")}</div>
                 <Row k="年份" v={paper.year} />
                 <Row k="会议" v={paper.venue} />
                 {paper.venue_verified && <Badge className="bg-accent text-accent-foreground">已验证顶会</Badge>}

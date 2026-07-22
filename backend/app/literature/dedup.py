@@ -6,29 +6,77 @@ back to title since we don't store it separately yet.
 """
 from __future__ import annotations
 
-from app.literature.models import CandidatePaper
+from app.literature.models import CandidatePaper, _normalize_title
 from app.literature.venue_registry import VenueRegistry, get_venue_registry
 
 
+def _dedup_keys(p: CandidatePaper) -> list[tuple]:
+    """All identifiers `p` can be matched by; two papers merge if they share any.
+
+    arxiv_id is included ALONGSIDE DOI so a preprint (arXiv DOI
+    10.48550/arxiv.X) and its published version (publisher DOI) - which share
+    arxiv_id but NOT a DOI - still dedup. Title is only a key when no
+    DOI/arXiv is present (design §9.2 fallback), so two distinct papers that
+    happen to share a title but have real identifiers don't get wrongly merged.
+    """
+    keys: list[tuple] = []
+    if p.doi:
+        keys.append(("doi", p.doi.lower().strip()))
+    if p.arxiv_id:
+        keys.append(("arxiv", p.arxiv_id.strip().lower()))
+    if not p.doi and not p.arxiv_id:
+        keys.append(("title", _normalize_title(p.title)))
+    return keys
+
+
 def deduplicate(papers: list[CandidatePaper]) -> list[CandidatePaper]:
-    """Merge duplicates by dedup_key, preferring entries with richer metadata."""
-    buckets: dict[tuple, list[CandidatePaper]] = {}
-    for p in papers:
-        buckets.setdefault(p.dedup_key(), []).append(p)
+    """Merge duplicates by any shared identifier (DOI / arXiv id / title).
+
+    Uses union-find so a paper matches if it shares ANY identifier with another,
+    not just one canonical key. Single-key bucketing split the same paper in two
+    when OpenAlex returned the publisher DOI and arXiv returned the arXiv DOI
+    (same arxiv_id, different DOI). Now both shared-DOI and shared-arxiv pairs
+    merge correctly.
+    """
+    n = len(papers)
+    parent = list(range(n))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    seen: dict[tuple, int] = {}
+    for i, p in enumerate(papers):
+        for k in _dedup_keys(p):
+            j = seen.get(k)
+            if j is None:
+                seen[k] = i
+            else:
+                union(i, j)
+
+    groups: dict[int, list[int]] = {}
+    for i in range(n):
+        groups.setdefault(find(i), []).append(i)
+
+    def score(p: CandidatePaper) -> int:
+        return sum(1 for v in (p.doi, p.arxiv_id, p.abstract, p.pdf_url, p.venue, p.year) if v)
 
     merged: list[CandidatePaper] = []
-    for group in buckets.values():
+    for group in groups.values():
         if len(group) == 1:
-            merged.append(group[0])
+            merged.append(papers[group[0]])
             continue
         # Score by completeness; pick the best, graft missing fields from others.
-        def score(p: CandidatePaper) -> int:
-            return sum(
-                1 for v in (p.doi, p.arxiv_id, p.abstract, p.pdf_url, p.venue, p.year) if v
-            )
-        group.sort(key=score, reverse=True)
-        best = group[0].model_copy()
-        for other in group[1:]:
+        ordered = sorted((papers[i] for i in group), key=score, reverse=True)
+        best = ordered[0].model_copy()
+        for other in ordered[1:]:
             for field in ("doi", "arxiv_id", "abstract", "pdf_url", "venue", "year", "cited_by_count"):
                 if not getattr(best, field) and getattr(other, field):
                     setattr(best, field, getattr(other, field))

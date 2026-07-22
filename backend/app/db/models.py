@@ -344,3 +344,36 @@ class RunMetric(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
 
     run: Mapped[ExperimentRun] = relationship(back_populates="metrics")
+
+
+class Benchmark(Base):
+    """A benchmark dataset/task + optional SOTA number found for a project.
+
+    Populated by the experiment agent's find_benchmarks step (PapersWithCode /
+    HuggingFace). `kind` is "dataset" | "task" | "sota". For SOTA rows,
+    metric_name + metric_value hold the leaderboard number to compare the
+    user's results against.
+    """
+
+    __tablename__ = "benchmarks"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    experiment_id: Mapped[str | None] = mapped_column(
+        ForeignKey("experiments.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    kind: Mapped[str] = mapped_column(String, nullable=False)  # dataset | task | sota
+    source: Mapped[str] = mapped_column(String, nullable=False)  # paperswithcode | hf
+    url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    task_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    dataset_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    metric_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    metric_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    paper_id: Mapped[str | None] = mapped_column(
+        ForeignKey("papers.id", ondelete="SET NULL"), nullable=True
+    )
+    extra_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)

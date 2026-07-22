@@ -3,13 +3,14 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db.models import Paper, Project
 from app.db.session import get_db
 from app.schemas import ProjectCreate, ProjectOut, ProjectUpdate
 from app.utils import new_id, slugify
-from app.workspace.manager import WorkspaceManager
+from app.workspace.manager import WorkspaceManager, audit
 from app.workspace.sandbox import SandboxError
 
 router = APIRouter(prefix="/api/v1/projects", tags=["projects"])
@@ -71,7 +72,20 @@ def create_project(payload: ProjectCreate, db: Session = Depends(get_db)) -> Pro
         status="active",
     )
     db.add(project)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        # TOCTOU: two concurrent creates with the same slug both passed the
+        # existence check. Roll back and remove the directory we just created
+        # so a retry isn't blocked by FileExistsError, then surface a 409.
+        db.rollback()
+        try:
+            import shutil
+
+            shutil.rmtree(root, ignore_errors=True)
+        except OSError:
+            pass
+        raise HTTPException(409, f"Project slug already exists: {slug}") from exc
     db.refresh(project)
     return _to_out(db, project, paper_count=0, downloaded=0)
 
@@ -128,9 +142,20 @@ def delete_project(project_id: str, db: Session = Depends(get_db)) -> None:
     p = db.get(Project, project_id)
     if p is None:
         raise HTTPException(404, "Project not found")
-    try:
-        _ws.delete_project(db, project_id=project_id, slug=p.slug)
-    except SandboxError as exc:
-        raise HTTPException(400, str(exc)) from exc
+    slug = p.slug
+    root = _ws.project_root(slug)
+    # Commit the DB deletion BEFORE rmtree. The old order rmtree'd first, so a
+    # commit failure (DB locked) left a Project row pointing at a missing dir,
+    # breaking every later op. Now a commit failure leaves the dir intact and
+    # the user can retry; a rmtree failure after commit leaves an orphan dir
+    # (harmless) rather than a broken row.
+    audit(db, action_type="project.delete", project_id=project_id, target=str(root))
     db.delete(p)
     db.commit()
+    try:
+        if root.exists():
+            import shutil
+
+            shutil.rmtree(root)
+    except OSError:
+        pass  # best-effort; the DB is already consistent

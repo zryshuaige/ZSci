@@ -148,3 +148,55 @@ def test_subprocess_env_does_not_inherit_api_keys(client, project, monkeypatch):
     assert "sk-LEAK-VALUE-DO-NOT-EXFIL-12345" not in logs, (
         "C4: API key leaked into the experiment subprocess environment"
     )
+
+
+def test_list_experiment_files_and_read(client, project):
+    """Phase D: the code browser lists source files (skipping runs/) and reads one."""
+    exp = client.post(
+        f"/api/v1/projects/{project['id']}/experiments",
+        json={"title": "Code Browser"},
+    ).json()
+    files = client.get(f"/api/v1/experiments/{exp['id']}/files").json()["files"]
+    # scaffold writes src/train.py + configs/base.yaml etc.
+    assert "src/train.py" in files
+    # runs/ must be excluded (it's a run-output dir, not source).
+    assert not any(f.startswith("runs/") for f in files)
+    # Read a file.
+    body = client.get(f"/api/v1/experiments/{exp['id']}/file?path=src/train.py").json()
+    assert body["path"] == "src/train.py"
+    assert "METRIC" in body["content"]
+
+
+def test_get_experiment_file_rejects_traversal(client, project):
+    """The code browser must not escape the experiment dir via .. """
+    exp = client.post(
+        f"/api/v1/projects/{project['id']}/experiments",
+        json={"title": "Traversal"},
+    ).json()
+    # ../../<anything> resolves outside the exp dir -> 403.
+    resp = client.get(f"/api/v1/experiments/{exp['id']}/file?path=../../etc/passwd")
+    assert resp.status_code in (403, 404)
+
+
+def test_benchmarks_list_empty_then_404(client):
+    # Unknown project -> 404 (proves the route + ownership guard are wired).
+    assert client.get("/api/v1/projects/prj_nope/benchmarks").status_code == 404
+
+
+def test_codegen_safe_rel_path_rejects_traversal():
+    """The codegen path guard must reject `..` traversal (sandbox escape).
+    Regression: str.lstrip('./') used to eat the leading dots of `../escape.py`,
+    turning it into `escape.py` which resolved inside exp_root and passed."""
+    from pathlib import Path
+
+    from app.experiments.codegen import _safe_rel_path
+
+    exp_root = Path("/tmp/proj/exp1").resolve()
+    # Legit paths pass.
+    assert _safe_rel_path(exp_root, "src/train.py") is not None
+    assert _safe_rel_path(exp_root, "./src/x.py") is not None
+    assert _safe_rel_path(exp_root, "runs/x.log") is not None
+    # Traversal / absolute must be rejected.
+    for bad in ("../escape.py", "../../etc/passwd", "/etc/passwd",
+                "src/../../escape.py", "src/../other/x.py", "", None):
+        assert _safe_rel_path(exp_root, bad) is None, f"{bad!r} should be rejected"

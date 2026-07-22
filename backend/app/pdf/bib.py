@@ -16,7 +16,9 @@ def _cite_key(paper: Paper) -> str:
             if authors:
                 last = str(authors[0]).split()[-1]
                 first_author = re.sub(r"[^A-Za-z]", "", last).lower()
-        except (ValueError, IndexError):
+        except (ValueError, IndexError, KeyError, TypeError):
+            # KeyError: authors_json decoded to a dict instead of a list.
+            # TypeError: authors_json decoded to a non-subscriptable value.
             pass
     year = paper.year or "nd"
     slug = re.sub(r"[^a-z0-9]+", "", (paper.title or "").lower())[:15]

@@ -5,11 +5,27 @@ canonical names + aliases.
 """
 from __future__ import annotations
 
+import re
 from functools import lru_cache
 from importlib import resources
 from pathlib import Path
 
 import yaml
+
+_YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
+_PUNCT_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _norm_venue(s: str | None) -> str:
+    """Normalize a venue string for exact comparison: lowercase, drop the year,
+    drop all non-alphanumerics. "ACL 2023" -> "acl", "NeurIPS Workshop" ->
+    "neuripsworkshop" (deliberately != "neurips", so workshops don't verify as
+    the main conference).
+    """
+    s = (s or "").lower().strip()
+    s = _YEAR_RE.sub(" ", s)
+    s = _PUNCT_RE.sub("", s)
+    return s
 
 
 class VenueEntry:
@@ -23,12 +39,17 @@ class VenueEntry:
         self.aliases.append(self.name.lower())
 
     def matches(self, venue: str) -> bool:
-        v = (venue or "").lower().strip()
+        v = _norm_venue(venue)
         if not v:
             return False
-        if self.name.lower() in v or v in self.name.lower():
+        # Exact normalized equality only (no substring). Bidirectional substring
+        # matching over-matched: "neurips" in "neurips workshop" verified a
+        # workshop as the NeurIPS main conference, and "acl" in "naacl"
+        # relabeled NAACL papers as ACL. Because tag_venues rewrites the venue
+        # string in place, those false positives permanently corrupted data.
+        if v == _norm_venue(self.name):
             return True
-        return any(a and a in v for a in self.aliases)
+        return any(v == _norm_venue(a) for a in self.aliases)
 
 
 class VenueRegistry:

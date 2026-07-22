@@ -50,8 +50,6 @@ def parse_pdf(
     project_slug: str,
 ) -> dict:
     """Parse the paper's local PDF. Returns a summary dict (design.md §9.3)."""
-    import fitz  # PyMuPDF
-
     pdf_path = _resolve_pdf_path(paper)
     assert_within_project(project_slug, pdf_path)
 
@@ -62,6 +60,8 @@ def parse_pdf(
     # raises. Previously, an exception between `fitz.open` and `doc.close()`
     # leaked file descriptors and memory-mapped pages.
     try:
+        import fitz  # PyMuPDF (inside try so a missing dep -> ParseError, not a 500)
+
         with fitz.open(pdf_path) as doc:
             pages: list[dict] = []
             sections: list[dict] = []
@@ -93,17 +93,27 @@ def parse_pdf(
 
                 # Extract images on the page.
                 for img_index, img in enumerate(page.get_images(full=True)):
+                    pix = None
                     try:
                         xref = img[0]
                         pix = fitz.Pixmap(doc, xref)
                         if pix.n - pix.alpha >= 4:  # CMYK -> RGB
-                            pix = fitz.Pixmap(fitz.csRGB, pix)
+                            rgb = fitz.Pixmap(fitz.csRGB, pix)
+                            pix.close()
+                            pix = rgb
                         fig_path = figures_dir / f"page{i:03d}_img{img_index:02d}.png"
                         fig_path.parent.mkdir(parents=True, exist_ok=True)
                         pix.save(fig_path)
-                        pix = None  # noqa: F841
                     except Exception:  # noqa: BLE001
                         logger.debug("Failed to extract image %s on page %s", img_index, i)
+                    finally:
+                        # Explicit close releases the mmap'd image buffer now
+                        # instead of queuing for GC; matters on image-heavy PDFs.
+                        if pix is not None:
+                            try:
+                                pix.close()
+                            except Exception:  # noqa: BLE001
+                                pass
 
             if current_section:
                 current_section["page_end"] = len(doc)

@@ -259,8 +259,20 @@ export default function PdfReader({
         canvas.style.height = `${cssViewport.height}px`;
         const ctx = canvas.getContext("2d");
         if (!ctx) return;
-        await page.render({ canvasContext: ctx, viewport: backingViewport }).promise;
-        if (genRef.current !== myGen) return;
+        // Capture the render task so we can cancel it if a newer scale supersedes
+        // this render mid-flight. Without cancel(), superseded renders keep running
+        // to completion in the pdfjs worker, piling up on rapid zoom (jank).
+        const renderTask = page.render({ canvasContext: ctx, viewport: backingViewport });
+        try {
+          await renderTask.promise;
+        } catch {
+          // cancelled or failed - either way, don't write stale state
+          return;
+        }
+        if (genRef.current !== myGen) {
+          renderTask.cancel();
+          return;
+        }
 
         // Text layer for selection. Lives in CSS px to match the displayed canvas.
         textLayerEl.innerHTML = "";
@@ -623,7 +635,9 @@ export default function PdfReader({
           className="fixed z-40 bg-card border border-border rounded-lg shadow-float p-1 flex gap-1 animate-pop"
           style={{
             left: Math.min(selection.x, (typeof window !== "undefined" ? window.innerWidth : 9999) - 200),
-            top: selection.y + 16,
+            // Clamp top so a selection near the bottom of the viewport doesn't
+            // push the popover (and its 翻译/加入笔记 buttons) off-screen.
+            top: Math.min(selection.y + 16, (typeof window !== "undefined" ? window.innerHeight : 9999) - 60),
           }}
           onMouseDown={(e) => e.preventDefault()}
         >

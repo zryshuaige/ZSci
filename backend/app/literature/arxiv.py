@@ -97,7 +97,10 @@ async def search_arxiv(
         if published[:4].isdigit():
             year = int(published[:4])
 
-        if years and year and not (years[0] <= year <= years[1]):
+        # If a year filter is set but the entry's year can't be parsed, drop it
+        # rather than silently passing (old `and year` short-circuit kept
+        # unparseable entries inside a "2020-2024 only" search).
+        if years and (year is None or not (years[0] <= year <= years[1])):
             continue
 
         # arXiv has no "venue"; we leave it null (preprint).

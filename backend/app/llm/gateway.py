@@ -126,13 +126,19 @@ class Gateway:
             stream = litellm.completion(**params)
         except Exception as exc:  # noqa: BLE001
             raise GatewayError(f"Model stream failed: {exc}") from exc
-        for chunk in stream:
-            try:
-                delta = chunk["choices"][0]["delta"].get("content")
-            except (KeyError, IndexError, TypeError):
-                delta = None
-            if delta:
-                yield delta
+        try:
+            for chunk in stream:
+                try:
+                    delta = chunk["choices"][0]["delta"].get("content")
+                except (KeyError, IndexError, TypeError):
+                    delta = None
+                if delta:
+                    yield delta
+        except Exception as exc:  # noqa: BLE001
+            # Errors raised lazily during iteration (timeout / 429 / 401
+            # mid-stream) surface as raw litellm/provider exceptions; wrap them
+            # so callers' `except GatewayError` actually catches the failure.
+            raise GatewayError(f"Model stream failed: {exc}") from exc
 
 
 @lru_cache

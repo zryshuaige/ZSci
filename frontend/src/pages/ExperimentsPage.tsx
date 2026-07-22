@@ -1,7 +1,7 @@
 import { useState } from "react";
-import { Link, useOutletContext } from "react-router-dom";
+import { Link, useNavigate, useOutletContext } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Plus, FlaskConical } from "lucide-react";
+import { Plus, FlaskConical, Sparkles } from "lucide-react";
 import { api, type Project } from "@/lib/api";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
@@ -10,15 +10,20 @@ import { Badge } from "@/components/ui/Badge";
 import { ConfirmDialog } from "@/components/ui/Dialog";
 import { ListSkeleton } from "@/components/ui/Skeleton";
 import { EmptyState } from "@/components/ui/EmptyState";
+import BenchmarksPanel from "@/components/BenchmarksPanel";
 
 export default function ExperimentsPage() {
   const { project } = useOutletContext<{ project: Project }>();
   const qc = useQueryClient();
+  const navigate = useNavigate();
   const [creating, setCreating] = useState(false);
   const [title, setTitle] = useState("");
   const [rq, setRq] = useState("");
   const [hyp, setHyp] = useState("");
   const [relatedIdeaId, setRelatedIdeaId] = useState<string | null>(null);
+  // When set, creating the experiment also kicks off the autonomous agent and
+  // navigates to the detail page so the user watches the live progress stream.
+  const [autonomous, setAutonomous] = useState(false);
 
   const { data: exps = [], isLoading: expsLoading } = useQuery({
     queryKey: ["experiments", project.id],
@@ -39,9 +44,24 @@ export default function ExperimentsPage() {
         hypothesis: hyp,
         related_idea_id: relatedIdeaId || undefined,
       }),
-    onSuccess: () => {
+    onSuccess: async (exp) => {
       qc.invalidateQueries({ queryKey: ["experiments", project.id] });
-      setCreating(false); setTitle(""); setRq(""); setHyp(""); setRelatedIdeaId(null);
+      const goAutonomous = autonomous;
+      setCreating(false); setTitle(""); setRq(""); setHyp(""); setRelatedIdeaId(null); setAutonomous(false);
+      if (goAutonomous) {
+        // Start the task HERE and pass its id to the detail page via query
+        // string, so the detail page's launcher picks it up instead of starting
+        // a SECOND duplicate task. Previously the task_id was discarded and the
+        // user could launch a racing second task from the detail page.
+        let taskId: string | null = null;
+        try {
+          const r = await api.startAutonomous(exp.id, {});
+          taskId = r.task_id;
+        } catch {
+          taskId = null; // detail page launcher will show the failure state
+        }
+        navigate(`/projects/${project.id}/experiments/${exp.id}${taskId ? `?task=${taskId}` : ""}`);
+      }
     },
   });
 
@@ -71,6 +91,8 @@ export default function ExperimentsPage() {
         支持从「研究想法」一键导入 idea。
       </Card>
 
+      <BenchmarksPanel projectId={project.id} />
+
       {expsLoading ? (
         <ListSkeleton rows={3} />
       ) : exps.length === 0 ? (
@@ -92,7 +114,12 @@ export default function ExperimentsPage() {
                     )}
                     <div className="text-xs text-muted-foreground mt-1 font-mono">{e.slug}</div>
                   </div>
-                  <Badge className="bg-muted">{e.status}</Badge>
+                  <Badge className={
+                    e.status === "done" ? "bg-green-100 text-green-800" :
+                    e.status === "failed" || e.status === "smoke_failed" ? "bg-red-100 text-red-800" :
+                    e.status === "generated" || e.status === "scaffolded" ? "bg-amber-100 text-amber-800" :
+                    "bg-blue-100 text-blue-800"
+                  }>{e.status}</Badge>
                 </div>
               </Card>
             </Link>
@@ -131,11 +158,20 @@ export default function ExperimentsPage() {
               value={hyp}
               onChange={(e) => setHyp(e.target.value)}
             />
+            <label className="flex items-center gap-2 text-xs cursor-pointer">
+              <input
+                type="checkbox"
+                checked={autonomous}
+                onChange={(e) => setAutonomous(e.target.checked)}
+              />
+              <Sparkles className="h-3.5 w-3.5 text-amber-500" />
+              创建后立即启动自主实验 Agent(查 benchmark {">"} 生成代码 {">"} smoke 自修复 {">"} 跑实验)
+            </label>
             <div className="text-xs text-muted-foreground">将在本地生成 uv 实验项目骨架。</div>
           </div>
         }
-        confirmLabel="创建"
-        onCancel={() => setCreating(false)}
+        confirmLabel={autonomous ? "创建并启动自主实验" : "创建"}
+        onCancel={() => { setCreating(false); setAutonomous(false); }}
         onConfirm={() => title.trim() && createMutation.mutate()}
       />
     </div>

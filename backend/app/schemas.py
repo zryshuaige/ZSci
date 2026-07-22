@@ -422,6 +422,45 @@ class MetricOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class BenchmarkOut(BaseModel):
+    id: str
+    project_id: str
+    experiment_id: str | None
+    name: str
+    kind: str
+    source: str
+    url: str | None
+    task_name: str | None
+    dataset_name: str | None
+    metric_name: str | None
+    metric_value: float | None
+    paper_id: str | None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class BenchmarkSearchRequest(BaseModel):
+    query: str
+    experiment_id: str | None = None
+    limit: int = 8
+
+
+class CodegenRequest(BaseModel):
+    selected_papers: list[str] = Field(default_factory=list)
+    selected_repositories: list[str] = Field(default_factory=list)
+
+
+class CodegenResponse(BaseModel):
+    relevant_papers: list[str] = Field(default_factory=list)
+    official_code_note: str = ""
+    plan: list[dict] = Field(default_factory=list)
+    files_written: list[str] = Field(default_factory=list)
+    run_command: str
+    smoke_command: str
+    risks: list[str] = Field(default_factory=list)
+
+
 # ---------------------------------------------------------------------------
 # Phase 4: writing
 # ---------------------------------------------------------------------------

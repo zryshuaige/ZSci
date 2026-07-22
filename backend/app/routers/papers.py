@@ -228,7 +228,11 @@ def parse_paper(paper_id: str, db: Session = Depends(get_db)) -> ParseResponse:
     try:
         result = parse_pdf(db, _ws, paper=paper, project_slug=project.slug)
     except ParseError as exc:
-        db.rollback()
+        # parse_pdf already set paper.parse_status="error" + flushed. Commit it
+        # so the UI shows "error" instead of staying "pending" forever. The old
+        # rollback here undid that flush and defeated the L28 fix.
+        paper.parse_status = "error"
+        db.commit()
         raise HTTPException(400, str(exc)) from exc
     db.commit()
     return ParseResponse(**result)

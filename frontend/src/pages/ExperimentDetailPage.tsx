@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useParams } from "react-router-dom";
+import { useParams, useSearchParams } from "react-router-dom";
 import { Play, Square } from "lucide-react";
 import { api, type Metric, type Run } from "@/lib/api";
 import { Button } from "@/components/ui/Button";
@@ -8,8 +8,15 @@ import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { Input, Textarea } from "@/components/ui/Input";
 import { ConfirmDialog, Spinner } from "@/components/ui/Dialog";
+import { MetricChart, CompareChart } from "@/components/charts/MetricChart";
+import { AutonomousLauncher } from "@/components/AutonomousPanel";
 export default function ExperimentDetailPage() {
   const { expId } = useParams<{ expId: string }>();
+  // If we were navigated here from "create + autonomous", the task_id is in the
+  // query string - hand it to the launcher so it streams the already-started
+  // task instead of launching a duplicate.
+  const [searchParams] = useSearchParams();
+  const initialTaskId = searchParams.get("task");
   const qc = useQueryClient();
   const [command, setCommand] = useState("uv run python -m src.train experiment=baseline");
   const [seed, setSeed] = useState("42");
@@ -72,8 +79,10 @@ export default function ExperimentDetailPage() {
         <div className="text-xs text-muted-foreground mt-1 font-mono">{exp.root_path}</div>
       </div>
 
+      <AutonomousLauncher expId={expId!} initialTaskId={initialTaskId} />
+
       <Card className="p-4 space-y-3">
-        <div className="font-medium text-sm">运行命令</div>
+        <div className="font-medium text-sm">运行命令(手动)</div>
         <Textarea rows={2} value={command} onChange={(e) => setCommand(e.target.value)} className="font-mono text-xs" />
         <div className="flex gap-2 items-center">
           <Input placeholder="seed" value={seed} onChange={(e) => setSeed(e.target.value)} className="w-32" />
@@ -228,101 +237,6 @@ function RunMetrics({ runId }: { runId: string }) {
   return <MetricChart metrics={metrics} />;
 }
 
-function MetricChart({ metrics }: { metrics: Metric[] }) {
-  const [logScale, setLogScale] = useState(false);
-  // Group by metric_name, render an SVG line chart.
-  const byName: Record<string, { step: number; v: number }[]> = {};
-  for (const m of metrics) {
-    (byName[m.metric_name] ||= []).push({ step: m.step, v: m.metric_value });
-  }
-  const names = Object.keys(byName);
-  const W = 560, H = 200, P = { l: 48, r: 12, t: 14, b: 24 };
-  const innerW = W - P.l - P.r;
-  const innerH = H - P.t - P.b;
-
-  const rawVals = metrics.map((m) => m.metric_value);
-  const allPositive = rawVals.every((v) => v > 0);
-  const useLog = logScale && allPositive;
-  const transform = (v: number) => (useLog ? Math.log(v) : v);
-  const tVals = rawVals.map(transform);
-  const minTV = Math.min(...tVals);
-  const maxTV = Math.max(...tVals);
-  const tRange = maxTV - minTV || 1;
-  const maxStep = Math.max(...metrics.map((m) => m.step)) || 1;
-
-  const colors = ["#2563eb", "#dc2626", "#16a34a", "#9333ea", "#ea580c", "#0891b2"];
-
-  const x = (step: number) => P.l + (step / maxStep) * innerW;
-  const y = (v: number) => P.t + innerH - ((transform(v) - minTV) / tRange) * innerH;
-
-  // 4 horizontal gridlines + y tick labels (back-transform to real values).
-  const gridLines = Array.from({ length: 4 }, (_, i) => {
-    const frac = i / 3;
-    const tVal = minTV + frac * tRange;
-    const realVal = useLog ? Math.exp(tVal) : tVal;
-    return { py: P.t + innerH - frac * innerH, label: fmtNum(realVal) };
-  });
-
-  const linePath = (pts: { step: number; v: number }[]) =>
-    pts
-      .map((p, i) => `${i === 0 ? "M" : "L"}${x(p.step).toFixed(1)},${y(p.v).toFixed(1)}`)
-      .join(" ");
-
-  return (
-    <div>
-      <div className="flex items-center justify-between mb-1">
-        <div className="text-xs text-muted-foreground">指标曲线({metrics.length} 点)</div>
-        <button
-          className="text-xs px-2 py-0.5 rounded border border-border hover:bg-muted disabled:opacity-40"
-          onClick={() => setLogScale((s) => !s)}
-          disabled={!allPositive}
-          title={allPositive ? "切换对数坐标" : "含非正值,无法使用对数坐标"}
-        >
-          {useLog ? "线性" : "对数"}
-        </button>
-      </div>
-      <svg width={W} height={H} className="border border-border rounded bg-white">
-        {/* gridlines + y-axis labels */}
-        {gridLines.map((g, i) => (
-          <g key={i}>
-            <line x1={P.l} y1={g.py} x2={W - P.r} y2={g.py} stroke="#e5e7eb" strokeWidth={1} />
-            <text x={P.l - 6} y={g.py + 3} fontSize={9} fill="#9ca3af" textAnchor="end">
-              {g.label}
-            </text>
-          </g>
-        ))}
-        {/* x-axis baseline + step labels */}
-        <line x1={P.l} y1={P.t + innerH} x2={W - P.r} y2={P.t + innerH} stroke="#d1d5db" strokeWidth={1} />
-        <text x={P.l} y={H - 6} fontSize={9} fill="#9ca3af">step 0</text>
-        <text x={W - P.r} y={H - 6} fontSize={9} fill="#9ca3af" textAnchor="end">step {maxStep}</text>
-        {/* lines + end-point markers */}
-        {names.map((n, i) => {
-          const c = colors[i % colors.length];
-          const pts = byName[n];
-          const last = pts[pts.length - 1];
-          return (
-            <g key={n}>
-              <path d={linePath(pts)} stroke={c} strokeWidth={1.8} fill="none" />
-              <circle cx={x(last.step)} cy={y(last.v)} r={2.6} fill={c} />
-            </g>
-          );
-        })}
-      </svg>
-      <div className="flex gap-3 mt-1 flex-wrap">
-        {names.map((n, i) => {
-          const last = byName[n][byName[n].length - 1];
-          return (
-            <span key={n} className="text-xs flex items-center gap-1">
-              <span style={{ background: colors[i % colors.length] }} className="w-2.5 h-2.5 inline-block rounded-full" />
-              {n} <span className="text-muted-foreground">= {fmtNum(last.v)}</span>
-            </span>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
 function fmtNum(v: number): string {
   const a = Math.abs(v);
   if (a !== 0 && (a < 1e-3 || a >= 1e5)) return v.toExponential(2);
@@ -376,8 +290,11 @@ function CompareRuns({ runs }: { runs: Run[] }) {
           </label>
         ))}
       </div>
+      {sel.length > 0 && (
+        <CompareChart runsMetrics={sel.map((id) => ({ runId: id, metrics: allMetrics[id] || [] }))} />
+      )}
       {names.length > 0 && (
-        <table className="text-xs w-full">
+        <table className="text-xs w-full mt-3">
           <thead>
             <tr className="border-b border-border">
               <th className="text-left py-1">指标</th>
