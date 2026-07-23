@@ -30,6 +30,113 @@ def test_list_skills(client):
     assert "writing.draft_section" in skills
 
 
+def test_active_workflows_lists_running_task_with_experiment_id(client, project, db_session):
+    """A running autonomous task should surface in /workflows/active with the
+    experiment_id parsed from input_json (no FK column on agent_tasks)."""
+    import json
+
+    from app.db.models import AgentTask, AgentTaskEvent
+    from app.utils import new_id
+
+    exp = client.post(
+        f"/api/v1/projects/{project['id']}/experiments",
+        json={"title": "Auto Exp"},
+    ).json()
+
+    task = AgentTask(
+        id=new_id("task"),
+        project_id=project["id"],
+        task_type="experiment.autonomous_run",
+        input_json=json.dumps({"experiment_id": exp["id"], "research_question": "q"}),
+        status="running",
+    )
+    db_session.add(task)
+    db_session.add(AgentTaskEvent(
+        id=new_id("evt"), task_id=task.id, kind="step", message="阶段 1/5:查找 benchmark",
+    ))
+    db_session.commit()
+
+    resp = client.get("/api/v1/workflows/active")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    matching = [t for t in body["tasks"] if t["id"] == task.id]
+    assert len(matching) == 1, body
+    t = matching[0]
+    assert t["experiment_id"] == exp["id"]
+    assert t["status"] == "running"
+    assert t["last_message"] == "阶段 1/5:查找 benchmark"
+
+
+def test_active_workflows_recent_terminal_tasks_linger(client, project, db_session):
+    """Terminal tasks appear in /workflows/active for the recent window (so a
+    fast sync task like generate-idea is still visible after it finishes), but
+    old terminal tasks don't."""
+    from datetime import UTC, datetime, timedelta
+
+    from app.db.models import AgentTask
+    from app.utils import new_id
+
+    # Fresh terminal task -> should surface as recent.
+    fresh = AgentTask(
+        id=new_id("task"),
+        project_id=project["id"],
+        task_type="research.generate_hypothesis",
+        input_json="{}",
+        status="completed",
+    )
+    db_session.add(fresh)
+    # Old terminal task (updated > 90s ago) -> must NOT appear.
+    old = AgentTask(
+        id=new_id("task"),
+        project_id=project["id"],
+        task_type="research.trend_analysis",
+        input_json="{}",
+        status="failed",
+        updated_at=datetime.now(UTC) - timedelta(seconds=200),
+    )
+    db_session.add(old)
+    db_session.commit()
+
+    body = client.get("/api/v1/workflows/active").json()
+    ids = [t["id"] for t in body["tasks"]]
+    assert fresh.id in ids, body
+    assert old.id not in ids, body
+    fresh_out = next(t for t in body["tasks"] if t["id"] == fresh.id)
+    assert fresh_out["recent"] is True
+    assert fresh_out["status"] == "completed"
+
+
+def test_active_workflows_lists_running_run(client, project, db_session):
+    """A running experiment run should surface in /workflows/active with the
+    owning experiment + project ids (for sidebar deep-linking). Exercises the
+    ExperimentRun -> Experiment join."""
+    from app.db.models import ExperimentRun
+    from app.utils import new_id
+
+    exp = client.post(
+        f"/api/v1/projects/{project['id']}/experiments",
+        json={"title": "Run Exp"},
+    ).json()
+
+    run = ExperimentRun(
+        id=new_id("run"),
+        experiment_id=exp["id"],
+        status="running",
+        command="uv run python -m src.train",
+        seed=42,
+    )
+    db_session.add(run)
+    db_session.commit()
+
+    body = client.get("/api/v1/workflows/active").json()
+    matching = [r for r in body["runs"] if r["run_id"] == run.id]
+    assert len(matching) == 1, body
+    r = matching[0]
+    assert r["experiment_id"] == exp["id"]
+    assert r["project_id"] == project["id"]
+    assert r["command"] == "uv run python -m src.train"
+
+
 def test_create_task_unknown_type_rejected(client, project):
     resp = client.post(
         f"/api/v1/projects/{project['id']}/agent/tasks",

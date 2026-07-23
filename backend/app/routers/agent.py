@@ -22,10 +22,20 @@ from app.agent.service import (
     list_skills,
     run_task,
 )
-from app.db.models import AgentTask, Approval, Project
+from app.db.models import AgentTask, AgentTaskEvent, Approval, Experiment, ExperimentRun, Project
 from app.db.session import get_db
 from app.llm.gateway import GatewayError, ModelNotConfigured
-from app.schemas import AgentEventOut, AgentTaskCreate, AgentTaskOut, ApprovalDecision, ApprovalOut
+from app.schemas import (
+    ActiveWorkflowRunOut,
+    ActiveWorkflowsOut,
+    ActiveWorkflowTaskOut,
+    AgentEventOut,
+    AgentTaskCreate,
+    AgentTaskOut,
+    ApprovalDecision,
+    ApprovalOut,
+    JobOut,
+)
 
 router = APIRouter(tags=["agent"])
 logger = logging.getLogger("zsci.router.agent")
@@ -34,6 +44,127 @@ logger = logging.getLogger("zsci.router.agent")
 @router.get("/api/v1/agent/skills")
 def get_skills() -> dict:
     return {"skills": list_skills()}
+
+
+@router.get("/api/v1/workflows/active", response_model=ActiveWorkflowsOut)
+def list_active_workflows(db: Session = Depends(get_db)) -> ActiveWorkflowsOut:
+    """All in-progress workflows across projects, for the global sidebar.
+
+    Returns active agent tasks (running/pending/awaiting_approval) + active
+    experiment runs, PLUS recently-finished agent tasks (terminal within the
+    recent window). The recent tail matters because several agent tasks
+    (trend_analysis, generate_hypothesis, github search) run synchronously and
+    can finish between the sidebar's polls - without the recent window a fast
+    "generate idea" would never be visible globally. Autonomous tasks carry the
+    experiment_id parsed from input_json so the frontend can deep-link.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    active_statuses = ("running", "pending", "awaiting_approval", "planning")
+    terminal_statuses = ("completed", "failed", "rejected", "stopped")
+    # Window long enough to cover the sidebar's idle poll gap (4s) with margin,
+    # short enough not to clutter. A finished task lingers ~90s.
+    recent_cutoff = datetime.now(UTC) - timedelta(seconds=90)
+
+    active = db.scalars(
+        select(AgentTask)
+        .where(AgentTask.status.in_(active_statuses))
+        .order_by(AgentTask.created_at.desc())
+        .limit(20)
+    ).all()
+    recent = db.scalars(
+        select(AgentTask)
+        .where(AgentTask.status.in_(terminal_statuses), AgentTask.updated_at > recent_cutoff)
+        .order_by(AgentTask.updated_at.desc())
+        .limit(10)
+    ).all()
+    tasks = list(active) + list(recent)
+    task_ids = [t.id for t in tasks]
+
+    # Latest event message per task (events ordered newest-first; first seen per
+    # task wins). Small N (<=30) so this is cheap.
+    last_msg: dict[str, str | None] = {}
+    if task_ids:
+        evs = db.scalars(
+            select(AgentTaskEvent)
+            .where(AgentTaskEvent.task_id.in_(task_ids))
+            .order_by(AgentTaskEvent.created_at.desc(), AgentTaskEvent.id.desc())
+        ).all()
+        for e in evs:
+            if e.task_id not in last_msg:
+                last_msg[e.task_id] = e.message
+
+    active_ids = {t.id for t in active}
+    task_out: list[ActiveWorkflowTaskOut] = []
+    for t in tasks:
+        exp_id: str | None = None
+        # Autonomous tasks store experiment_id in input_json (no FK column -
+        # create_all doesn't alter existing tables, so we parse it here).
+        if t.task_type == "experiment.autonomous_run" and t.input_json:
+            try:
+                inp = json.loads(t.input_json)
+                if isinstance(inp, dict):
+                    exp_id = inp.get("experiment_id")
+            except (ValueError, TypeError):
+                pass
+        task_out.append(
+            ActiveWorkflowTaskOut(
+                id=t.id,
+                project_id=t.project_id,
+                task_type=t.task_type,
+                status=t.status,
+                experiment_id=exp_id,
+                last_message=last_msg.get(t.id),
+                recent=t.id not in active_ids,
+                created_at=t.created_at,
+                updated_at=t.updated_at,
+            )
+        )
+
+    rows = db.execute(
+        select(ExperimentRun, Experiment.project_id)
+        .join(Experiment, ExperimentRun.experiment_id == Experiment.id)
+        .where(ExperimentRun.status == "running")
+        .order_by(ExperimentRun.created_at.desc())
+        .limit(20)
+    ).all()
+    run_out = [
+        ActiveWorkflowRunOut(
+            run_id=r.id,
+            experiment_id=r.experiment_id,
+            project_id=pid,
+            command=r.command,
+            created_at=r.created_at,
+        )
+        for r, pid in rows
+    ]
+
+    # Jobs: the generic long-running-operation tracker (literature search,
+    # download, parse, translate, reading note, LaTeX compile, benchmark search).
+    from app.jobs import list_active_and_recent_jobs
+
+    act_jobs, recent_jobs = list_active_and_recent_jobs(db)
+    active_job_ids = {j.id for j in act_jobs}
+    job_out = [
+        JobOut(
+            id=j.id,
+            project_id=j.project_id,
+            kind=j.kind,
+            status=j.status,
+            title=j.title,
+            target_id=j.target_id,
+            target_type=j.target_type,
+            message=j.message,
+            error=j.error,
+            result_summary=j.result_summary,
+            recent=j.id not in active_job_ids,
+            created_at=j.created_at,
+            updated_at=j.updated_at,
+        )
+        for j in list(act_jobs) + list(recent_jobs)
+    ]
+
+    return ActiveWorkflowsOut(tasks=task_out, runs=run_out, jobs=job_out)
 
 
 @router.post("/api/v1/projects/{project_id}/agent/tasks", response_model=AgentTaskOut)

@@ -26,15 +26,29 @@ def translate(paper_id: str, payload: TranslateRequest, db: Session = Depends(ge
     paper = db.get(Paper, paper_id)
     if paper is None:
         raise HTTPException(404, "Paper not found")
+
+    from app.jobs import start_job, update_job
+
+    job = start_job(
+        db, project_id=paper.project_id, kind="translate",
+        title="翻译选中文本", target_id=paper_id, target_type="paper",
+        message="正在翻译",
+    )
     try:
         note = translate_text(
             db, paper_id=paper_id, text=payload.text, page=payload.page,
             target_lang=payload.target_lang,
         )
     except ModelNotConfigured as exc:
+        update_job(db, job.id, status="failed", error=str(exc))
         raise HTTPException(503, str(exc)) from exc
     except (GatewayError, ValueError) as exc:
+        update_job(db, job.id, status="failed", error=str(exc))
         raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        update_job(db, job.id, status="failed", error=str(exc))
+        raise
+    update_job(db, job.id, status="completed", result_summary="翻译完成")
     db.commit()
     db.refresh(note)
     return TranslationOut(
@@ -53,12 +67,26 @@ def make_reading_note(paper_id: str, db: Session = Depends(get_db)) -> ReadingNo
     paper = db.get(Paper, paper_id)
     if paper is None:
         raise HTTPException(404, "Paper not found")
+
+    from app.jobs import start_job, update_job
+
+    job = start_job(
+        db, project_id=paper.project_id, kind="reading_note",
+        title=f"生成阅读笔记: {paper.title or paper_id}", target_id=paper_id, target_type="paper",
+        message="LLM 正在生成阅读笔记",
+    )
     try:
         note = generate_reading_note(db, paper=paper)
     except ModelNotConfigured as exc:
+        update_job(db, job.id, status="failed", error=str(exc))
         raise HTTPException(503, str(exc)) from exc
     except (GatewayError, ValueError) as exc:
+        update_job(db, job.id, status="failed", error=str(exc))
         raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        update_job(db, job.id, status="failed", error=str(exc))
+        raise
+    update_job(db, job.id, status="completed", result_summary="阅读笔记已生成")
     db.commit()
     db.refresh(note)
     return ReadingNoteOut.model_validate(note)

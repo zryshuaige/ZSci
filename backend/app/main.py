@@ -46,11 +46,48 @@ async def lifespan(app: FastAPI):  # noqa: ANN001
     # shouldn't block async startup.
     import app.db.models  # noqa: F401  register tables with Base.metadata
     await asyncio.to_thread(Base.metadata.create_all, get_engine())
+    # Reap orphaned workflow state: any agent task / experiment run still marked
+    # "running" at startup is an orphan - the background orchestrator / subprocess
+    # died with the previous process. Mark them stopped so the global workflow
+    # sidebar doesn't list ghost tasks forever. (Single-process assumption; safe
+    # because there's no separate worker that might still be running them.)
+    await asyncio.to_thread(_reap_orphan_workflow_state)
     try:
         yield
     finally:
         # Dispose the engine on shutdown so file handles / connections release.
         await asyncio.to_thread(get_engine().dispose)
+
+
+def _reap_orphan_workflow_state() -> None:
+    """Mark in-flight tasks/runs as stopped on startup (they can't still be running)."""
+    from sqlalchemy import update
+
+    from app.db.models import AgentTask, ExperimentRun, Job
+    from app.db.session import get_sessionmaker
+
+    try:
+        with get_sessionmaker()() as db:
+            db.execute(
+                update(AgentTask)
+                .where(AgentTask.status.in_(("running", "pending", "planning")))
+                .values(status="stopped", error="进程重启,任务中断")
+            )
+            db.execute(
+                update(ExperimentRun)
+                .where(ExperimentRun.status == "running")
+                .values(status="stopped")
+            )
+            # Jobs too - a background LaTeX compile dies with the process.
+            db.execute(
+                update(Job)
+                .where(Job.status == "running")
+                .values(status="stopped", error="进程重启,任务中断")
+            )
+            db.commit()
+    except Exception:  # noqa: BLE001
+        # Startup must not fail on cleanup - the app is still usable without it.
+        pass
 
 
 def create_app() -> FastAPI:

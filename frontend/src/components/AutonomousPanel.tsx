@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { api, type AgentEvent } from "@/lib/api";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
@@ -14,7 +14,7 @@ import { Badge } from "@/components/ui/Badge";
  * gives up instead of looping forever, event dedup by id on replay, and the
  * reconnect timer is tracked + cleared on unmount. Once `done` arrives we stop
  * reconnecting entirely. */
-export default function AutonomousPanel({ taskId }: { taskId: string }) {
+export default function AutonomousPanel({ taskId, onReset }: { taskId: string; onReset?: () => void }) {
   const [events, setEvents] = useState<AgentEvent[]>([]);
   const [status, setStatus] = useState<string>("running");
   const [done, setDone] = useState(false);
@@ -88,13 +88,21 @@ export default function AutonomousPanel({ taskId }: { taskId: string }) {
     <Card className="p-4 space-y-2">
       <div className="flex items-center justify-between">
         <div className="font-medium text-sm">自主实验进度</div>
-        <Badge className={
-          status === "completed" ? "bg-green-100 text-green-800" :
-          status === "failed" ? "bg-red-100 text-red-800" :
-          "bg-blue-100 text-blue-800"
-        }>
-          {done ? status : "进行中…"}
-        </Badge>
+        <div className="flex items-center gap-2">
+          {/* When the task has reached a terminal state, offer to start a fresh
+              run instead of leaving the user staring at a completed log with no
+              way forward. */}
+          {done && onReset && (
+            <Button size="sm" variant="ghost" onClick={onReset}>启动新的一轮</Button>
+          )}
+          <Badge className={
+            status === "completed" ? "bg-green-100 text-green-800" :
+            status === "failed" ? "bg-red-100 text-red-800" :
+            "bg-blue-100 text-blue-800"
+          }>
+            {done ? status : "进行中…"}
+          </Badge>
+        </div>
       </div>
       <div className="space-y-1 max-h-80 overflow-auto">
         {events.length === 0 && <div className="text-xs text-muted-foreground">等待事件…</div>}
@@ -123,8 +131,15 @@ export default function AutonomousPanel({ taskId }: { taskId: string }) {
  * the streaming panel with the returned task_id.
  *
  * `initialTaskId` lets a caller (e.g. ExperimentsPage's "create + autonomous"
- * flow) hand off an already-started task so we don't lose it or start a
- * duplicate. */
+ * flow, or the sidebar deep-link) hand off an already-started task so we don't
+ * lose it or start a duplicate.
+ *
+ * Dedupe + survive-navigation: on mount we check the global active-workflows
+ * list for a running autonomous task on THIS experiment. If one exists we
+ * attach to it (stream its events) instead of showing the launch button - so
+ * navigating away and back never looks like the workflow "exited" and the user
+ * can't accidentally start a racing second task. Shares the sidebar's
+ * ["workflows","active"] cache (the sidebar drives the polling). */
 export function AutonomousLauncher({
   expId,
   initialTaskId,
@@ -132,13 +147,50 @@ export function AutonomousLauncher({
   expId: string;
   initialTaskId?: string | null;
 }) {
-  const [taskId, setTaskId] = useState<string | null>(initialTaskId ?? null);
+  // localTaskId: set from the URL param or when the user clicks launch (so the
+  // panel shows immediately, before the active-workflows poll catches up).
+  const [localTaskId, setLocalTaskId] = useState<string | null>(initialTaskId ?? null);
+  const { data: active, isLoading: checking } = useQuery({
+    queryKey: ["workflows", "active"],
+    queryFn: () => api.listActiveWorkflows(),
+    refetchInterval: false, // the sidebar drives polling; we just read the shared cache
+  });
+  // A currently-running autonomous task for this experiment, if any.
+  const activeTaskId =
+    active?.tasks.find(
+      (t) =>
+        t.task_type === "experiment.autonomous_run" &&
+        t.experiment_id === expId &&
+        ["running", "pending", "awaiting_approval"].includes(t.status),
+    )?.id ?? null;
+  // Prefer the live task; fall back to the local/URL one (e.g. a just-launched
+  // task not yet in the poll, or a completed task whose log we still want to show).
+  const effectiveTaskId = activeTaskId ?? localTaskId;
+
   const launch = useMutation({
     mutationFn: () => api.startAutonomous(expId, {}),
-    onSuccess: (r) => setTaskId(r.task_id),
+    onSuccess: (r) => setLocalTaskId(r.task_id),
   });
 
-  if (taskId) return <AutonomousPanel taskId={taskId} />;
+  if (effectiveTaskId) {
+    return (
+      <AutonomousPanel
+        taskId={effectiveTaskId}
+        onReset={() => setLocalTaskId(null)}
+      />
+    );
+  }
+
+  // While we're still checking for an existing task (and no URL task was given),
+  // don't show the launch button yet - avoids a race where the user could start
+  // a duplicate before the active-task check resolves.
+  if (checking && !initialTaskId) {
+    return (
+      <Card className="p-4 space-y-2">
+        <div className="text-xs text-muted-foreground">检测已有任务…</div>
+      </Card>
+    );
+  }
 
   return (
     <Card className="p-4 space-y-2">

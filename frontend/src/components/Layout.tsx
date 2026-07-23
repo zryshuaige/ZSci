@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Link, Outlet, useLocation } from "react-router-dom";
 import { FlaskConical, Settings, PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import { cn } from "@/lib/cn";
+import WorkflowStatus from "./WorkflowStatus";
 
 export default function Layout() {
   const location = useLocation();
@@ -33,10 +34,16 @@ export default function Layout() {
           <FlaskConical className="h-5 w-5 text-primary shrink-0" />
           {!collapsed && <span className="font-semibold tracking-tight">Z-Sci</span>}
         </div>
-        <nav className="flex-1 p-2 space-y-1 text-sm">
+        <nav className="p-2 space-y-1 text-sm">
           <NavLink to="/" active={isProjects} collapsed={collapsed} icon="🗂️" label="项目" />
           <NavLink to="/settings" active={isSettings} collapsed={collapsed} icon={<Settings className="h-4 w-4" />} label="设置" />
         </nav>
+        {/* Global workflow status: lists every running task/run across all
+            projects so navigating away from a workflow doesn't lose it. Click
+            an item to jump back to its page. */}
+        <div className={cn("flex-1 min-h-0 overflow-y-auto", collapsed && "py-2")}>
+          <WorkflowStatus collapsed={collapsed} />
+        </div>
         <button
           onClick={toggle}
           className={cn(

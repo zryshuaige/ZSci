@@ -11,6 +11,7 @@ Design principles (design.md §2.3, §4.4, §8.1):
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Iterator
 from functools import lru_cache
 
@@ -18,6 +19,12 @@ from app.config import ModelGatewayConfig, ProviderConfig, get_settings, load_ll
 from app.llm.providers import build_litellm_params
 
 logger = logging.getLogger("zsci.llm")
+
+# litellm fetches a remote model-cost map from raw.githubusercontent.com on
+# first use; on networks where that host is slow/blocked it times out (adding
+# delay to the first LLM call) before falling back to a local copy. Force the
+# local bundled map up front so the remote fetch is skipped entirely.
+os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
 
 
 class GatewayError(RuntimeError):

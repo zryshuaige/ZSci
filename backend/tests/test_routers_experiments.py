@@ -183,6 +183,86 @@ def test_benchmarks_list_empty_then_404(client):
     assert client.get("/api/v1/projects/prj_nope/benchmarks").status_code == 404
 
 
+def test_benchmark_search_surfaces_warnings_on_timeout(client, project, monkeypatch):
+    """When every benchmark source fails (timeout/mirror), the search endpoint
+    must return an empty list WITH warnings so the UI can tell "no results"
+    apart from "source unreachable". Regression for the silent-empty bug."""
+    from app.experiments import benchmarks as bm
+
+    def _fail(url, params, *, endpoints=None, warnings=None):
+        if warnings is not None:
+            warnings.append(f"源请求失败({url}):timed out")
+        return None
+
+    monkeypatch.setattr(bm, "_http_get_json", _fail)
+
+    resp = client.post(
+        f"/api/v1/projects/{project['id']}/benchmarks",
+        json={"query": "image classification"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["benchmarks"] == []
+    assert len(body["warnings"]) >= 1
+    assert "timed out" in body["warnings"][0]
+
+
+def test_benchmark_search_returns_benchmarks(client, project, monkeypatch):
+    """A successful search returns stored benchmark rows + no warnings."""
+    from app.experiments import benchmarks as bm
+
+    def _ok(url, params, *, endpoints=None, warnings=None):
+        if url == bm.HF_DATASETS_PATH:
+            return [{"id": "mnist"}]
+        return None  # PWC: empty
+
+    monkeypatch.setattr(bm, "_http_get_json", _ok)
+
+    resp = client.post(
+        f"/api/v1/projects/{project['id']}/benchmarks",
+        json={"query": "image classification"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["warnings"] == []
+    assert len(body["benchmarks"]) == 1
+    assert body["benchmarks"][0]["name"] == "mnist"
+    assert body["benchmarks"][0]["source"] == "hf"
+
+
+def test_manual_benchmark_create_and_delete(client, project):
+    """Manual benchmark entry works as a never-blocked fallback (no network)."""
+    # Create a SOTA row by hand.
+    resp = client.post(
+        f"/api/v1/projects/{project['id']}/benchmarks/manual",
+        json={
+            "name": "ImageNet SOTA",
+            "kind": "sota",
+            "url": "https://example.org/imagenet",
+            "metric_name": "top-1 acc",
+            "metric_value": 0.910,
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    bm = resp.json()
+    assert bm["source"] == "manual"
+    assert bm["kind"] == "sota"
+    assert bm["metric_value"] == 0.910
+
+    # It shows up in the list.
+    lst = client.get(f"/api/v1/projects/{project['id']}/benchmarks").json()
+    assert any(b["id"] == bm["id"] for b in lst)
+
+    # Delete it.
+    dele = client.delete(f"/api/v1/benchmarks/{bm['id']}")
+    assert dele.status_code == 200
+    lst = client.get(f"/api/v1/projects/{project['id']}/benchmarks").json()
+    assert not any(b["id"] == bm["id"] for b in lst)
+
+    # Deleting again -> 404.
+    assert client.delete(f"/api/v1/benchmarks/{bm['id']}").status_code == 404
+
+
 def test_codegen_safe_rel_path_rejects_traversal():
     """The codegen path guard must reject `..` traversal (sandbox escape).
     Regression: str.lstrip('./') used to eat the leading dots of `../escape.py`,

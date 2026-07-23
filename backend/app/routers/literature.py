@@ -158,20 +158,38 @@ async def search_literature(
     if project is None:
         raise HTTPException(404, "Project not found")
 
-    # Extract English/technical terms from CJK-heavy queries so arXiv/OpenAlex
-    # (English-indexed) actually match. Pure-English queries pass through.
-    search_query = _extract_search_terms(payload.query)
-    candidates = await _gather_candidates(search_query, payload.sources, payload.years, payload.limit)
-    if payload.top_venues_only:
-        candidates = filter_to_top_venues(candidates)
-    if payload.venues:
-        wanted = {v.lower() for v in payload.venues}
-        candidates = [c for c in candidates if c.venue and any(w in c.venue.lower() for w in wanted)]
-    candidates = sort_by_relevance(candidates)[: payload.limit]
+    # Track as a global Job so the sidebar shows "文献检索" while it runs and
+    # for ~90s after - literature search can take several seconds (OpenAlex +
+    # arXiv gather) and used to be invisible after navigating away.
+    from app.jobs import start_job, update_job
 
-    keys = _downloaded_keys(db, project_id)
-    outs = [_to_out(c, _is_downloaded(c, keys)) for c in candidates]
-    return LiteratureSearchResponse(query=payload.query, count=len(outs), papers=outs)
+    job = start_job(
+        db, project_id=project_id, kind="literature_search",
+        title=f"文献检索: {payload.query}", target_type="literature",
+        message="正在检索 OpenAlex + arXiv",
+    )
+    try:
+        # Extract English/technical terms from CJK-heavy queries so arXiv/OpenAlex
+        # (English-indexed) actually match. Pure-English queries pass through.
+        search_query = _extract_search_terms(payload.query)
+        candidates = await _gather_candidates(search_query, payload.sources, payload.years, payload.limit)
+        if payload.top_venues_only:
+            candidates = filter_to_top_venues(candidates)
+        if payload.venues:
+            wanted = {v.lower() for v in payload.venues}
+            candidates = [c for c in candidates if c.venue and any(w in c.venue.lower() for w in wanted)]
+        candidates = sort_by_relevance(candidates)[: payload.limit]
+
+        keys = _downloaded_keys(db, project_id)
+        outs = [_to_out(c, _is_downloaded(c, keys)) for c in candidates]
+        update_job(db, job.id, status="completed", result_summary=f"找到 {len(outs)} 篇")
+        return LiteratureSearchResponse(query=payload.query, count=len(outs), papers=outs)
+    except HTTPException:
+        update_job(db, job.id, status="failed", error="检索失败")
+        raise
+    except Exception as exc:  # noqa: BLE001
+        update_job(db, job.id, status="failed", error=str(exc))
+        raise
 
 
 @router.post("/recommend", response_model=LiteratureRecommendResponse)
@@ -183,53 +201,47 @@ async def recommend_literature(
 
     Derives a query from the research direction (+ downloaded papers), searches
     the literature sources, then re-ranks by TF-IDF cosine similarity to the
-    full interest profile (which captures more than the query string alone).
-    Returns a handful (top 6) of not-yet-downloaded papers.
+    full interest profile. Returns the top 6 not-yet-downloaded papers.
     """
     project = db.get(Project, project_id)
     if project is None:
         raise HTTPException(404, "Project not found")
 
-    profile = _project_interest_profile(db, project)
-    if not profile:
-        raise HTTPException(
-            400,
-            "项目还没有研究方向或已下载论文，无法生成推荐。请先填写研究方向或下载几篇论文。",
-        )
+    from app.jobs import start_job, update_job
 
-    # Query string: prefer the research direction (cleaner); fall back to the
-    # top tokens of the profile so recommendations still work when only
-    # downloaded papers exist.
-    raw_query = project.research_direction.strip() if project.research_direction else profile
-    # Extract English/technical terms from CJK queries so the English-indexed
-    # sources (arXiv/OpenAlex) can match. The profile (which may be Chinese) is
-    # still used as the TF-IDF similarity target below — extraction only affects
-    # the search query, not the ranking signal.
-    query = _extract_search_terms(raw_query)
+    job = start_job(
+        db, project_id=project_id, kind="literature_recommend",
+        title="智能推荐相似论文", target_type="literature",
+        message="正在检索并排序相似论文",
+    )
+    try:
+        profile = _project_interest_profile(db, project)
+        if not profile:
+            raise HTTPException(400, "项目还没有研究方向或已下载论文，无法生成推荐。请先填写研究方向或下载几篇论文。")
 
-    # Fetch a wider pool, then let similarity pick the best. No top-venue filter
-    # here - similarity is the ranking signal, and restricting to top venues
-    # would shrink the pool too aggressively for niche directions.
-    candidates = await _gather_candidates(query, ["openalex", "arxiv"], None, 60)
-    if not candidates:
-        # Distinguish "sources returned nothing" from "everything's downloaded"
-        # so the message is actionable. A CJK query with no extractable English
-        # terms often yields no candidates — point the user there.
-        if raw_query and _extract_search_terms(raw_query) == raw_query and bool(re.search(r"[\u4e00-\u9fff]", raw_query)):
-            raise HTTPException(
-                502,
-                "检索源暂无返回。你的研究方向是中文,尝试在方向里加入英文术语(如 CLIP、DeepLabV3+、VLM)能搜到更多论文。",
-            )
-        raise HTTPException(502, "检索源暂无返回，请稍后重试。")
+        raw_query = project.research_direction.strip() if project.research_direction else profile
+        query = _extract_search_terms(raw_query)
 
-    keys = _downloaded_keys(db, project_id)
-    # Exclude already-downloaded papers before ranking.
-    pool = [c for c in candidates if not _is_downloaded(c, keys)]
-    if not pool:
-        raise HTTPException(409, "候选论文均已下载，暂无新推荐。")
+        candidates = await _gather_candidates(query, ["openalex", "arxiv"], None, 60)
+        if not candidates:
+            if raw_query and _extract_search_terms(raw_query) == raw_query and bool(re.search(r"[一-鿿]", raw_query)):
+                raise HTTPException(502, "检索源暂无返回。你的研究方向是中文，尝试加入英文术语(如 CLIP、DeepLabV3+、VLM)能搜到更多论文。")
+            raise HTTPException(502, "检索源暂无返回，请稍后重试。")
 
-    scored = rank_by_similarity(pool, profile)
-    top_n = 6
-    top = scored[:top_n]
-    outs = [_to_out(c, False, round(sim, 4)) for c, sim in top]
-    return LiteratureRecommendResponse(query=query, count=len(outs), papers=outs)
+        keys = _downloaded_keys(db, project_id)
+        pool = [c for c in candidates if not _is_downloaded(c, keys)]
+        if not pool:
+            raise HTTPException(409, "候选论文均已下载，暂无新推荐。")
+
+        scored = rank_by_similarity(pool, profile)
+        top_n = 6
+        top = scored[:top_n]
+        outs = [_to_out(c, False, round(sim, 4)) for c, sim in top]
+        update_job(db, job.id, status="completed", result_summary=f"推荐 {len(outs)} 篇")
+        return LiteratureRecommendResponse(query=query, count=len(outs), papers=outs)
+    except HTTPException as exc:
+        update_job(db, job.id, status="failed", error=exc.detail if isinstance(exc.detail, str) else "推荐失败")
+        raise
+    except Exception as exc:  # noqa: BLE001
+        update_job(db, job.id, status="failed", error=str(exc))
+        raise

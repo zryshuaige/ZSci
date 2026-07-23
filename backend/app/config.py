@@ -44,8 +44,20 @@ class Settings(BaseSettings):
     # Path to the model-gateway YAML config. None -> use defaults / no models.
     llm_config_path: Path | None = None
 
-    # Request timeouts for external academic APIs (seconds).
+    # Request timeouts for external academic APIs (seconds). `academic_api_timeout`
+    # is the read timeout; `academic_api_connect_timeout` is the connect timeout so
+    # a dead/blocked host fails fast (and the benchmark mirror fallback kicks in
+    # quickly) instead of hanging the full read timeout.
     academic_api_timeout: float = 30.0
+    academic_api_connect_timeout: float = 5.0
+
+    # Benchmark discovery source. The official huggingface.co endpoint is the
+    # default; on connect failure/timeout the benchmarks module falls back to the
+    # hf-mirror.com mirror (China-accessible). To skip the dead-host wait entirely
+    # on a network where huggingface.co is blocked, set ZSCI_HF_ENDPOINT to the
+    # mirror (candidates are de-duped, so only one host is tried).
+    hf_endpoint: str = "https://huggingface.co"
+    hf_mirror: str = "https://hf-mirror.com"
 
     @property
     def research_agent_dir(self) -> Path:

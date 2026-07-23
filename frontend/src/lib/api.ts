@@ -175,6 +175,55 @@ export interface Approval {
   created_at: string;
 }
 
+// --- Active workflows (global sidebar status) ---
+export interface ActiveWorkflowTask {
+  id: string;
+  project_id: string;
+  task_type: string;
+  status: string;
+  experiment_id: string | null;
+  last_message: string | null;
+  /** True for tasks that just reached a terminal state (recent window) - shown
+   * dimmed in the sidebar so fast sync tasks (generate idea, etc.) leave a
+   * visible trace even if they finished between polls. */
+  recent: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ActiveWorkflowRun {
+  run_id: string;
+  experiment_id: string;
+  project_id: string;
+  command: string | null;
+  created_at: string;
+}
+
+export interface ActiveWorkflows {
+  tasks: ActiveWorkflowTask[];
+  runs: ActiveWorkflowRun[];
+  jobs: Job[];
+}
+
+// A generic long-running operation (literature search, paper download, parse,
+// translation, reading note, LaTeX compile, benchmark search). Surfaced in the
+// global sidebar so navigating away from the triggering page doesn't lose it.
+export interface Job {
+  id: string;
+  project_id: string;
+  kind: string;
+  status: string;
+  title: string | null;
+  target_id: string | null;
+  target_type: string | null; // paper | experiment | run | literature | writing
+  message: string | null;
+  error: string | null;
+  result_summary: string | null;
+  recent: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
 // --- Phase 3 ---
 export interface Experiment {
   id: string;
@@ -355,6 +404,9 @@ export const api = {
       body: JSON.stringify({ approved }),
     }),
   agentStreamUrl: (taskId: string) => `${BASE}/agent/tasks/${taskId}/stream`,
+  // Active workflows across all projects (global sidebar status).
+  listActiveWorkflows: () =>
+    request<ActiveWorkflows>("/workflows/active"),
 
   // --- Phase 3: experiments + runs ---
   listExperiments: (projectId: string) =>
@@ -378,12 +430,34 @@ export const api = {
     projectId: string,
     body: { query: string; experiment_id?: string; limit?: number }
   ) =>
-    request<Benchmark[]>(`/projects/${projectId}/benchmarks`, {
+    request<{ benchmarks: Benchmark[]; warnings: string[] }>(
+      `/projects/${projectId}/benchmarks`,
+      {
+        method: "POST",
+        body: JSON.stringify(body),
+      }
+    ),
+  listBenchmarks: (projectId: string) =>
+    request<Benchmark[]>(`/projects/${projectId}/benchmarks`),
+  createManualBenchmark: (
+    projectId: string,
+    body: {
+      name: string;
+      kind?: "dataset" | "task" | "sota";
+      url?: string | null;
+      task_name?: string | null;
+      dataset_name?: string | null;
+      metric_name?: string | null;
+      metric_value?: number | null;
+      experiment_id?: string | null;
+    }
+  ) =>
+    request<Benchmark>(`/projects/${projectId}/benchmarks/manual`, {
       method: "POST",
       body: JSON.stringify(body),
     }),
-  listBenchmarks: (projectId: string) =>
-    request<Benchmark[]>(`/projects/${projectId}/benchmarks`),
+  deleteBenchmark: (benchmarkId: string) =>
+    request<{ ok: boolean }>(`/benchmarks/${benchmarkId}`, { method: "DELETE" }),
   startAutonomous: (
     expId: string,
     body: { selected_papers?: string[]; selected_repositories?: string[]; run_configs?: string[] }
@@ -418,7 +492,7 @@ export const api = {
       method: "PUT", body: JSON.stringify({ content }),
     }),
   compileWriting: (projectId: string) =>
-    request<{ ok: boolean; pdf_path?: string; log?: string; error?: string }>(`/projects/${projectId}/writing/compile`, { method: "POST" }),
+    request<{ job_id: string }>(`/projects/${projectId}/writing/compile`, { method: "POST" }),
   writingPdfUrl: (projectId: string) => `${BASE}/projects/${projectId}/writing/pdf`,
   getCitations: (projectId: string) =>
     request<{ available_keys: string[]; used_keys: string[]; missing: string[]; ok: boolean; used_in: Record<string, string[]> }>(`/projects/${projectId}/writing/citations`),

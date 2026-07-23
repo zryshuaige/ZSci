@@ -163,9 +163,17 @@ async def run_experiment(
         )
         _ACTIVE[run.id] = proc
         # Persist PID immediately so stop_run can find it even if this worker
-        # is restarted or doesn't own the process (H6, L27).
+        # is restarted or does not own the process. H6, L27.
         run.pid = proc.pid
-        db.flush()
+        # COMMIT (not just flush) the running status and pid before the
+        # subprocess runs. A run can take minutes; without a commit the whole
+        # run sits in one open transaction holding the SQLite write lock and
+        # stays invisible to other sessions. Committing here releases that lock
+        # so other operations (sidebar, agent events) can write, and lets the
+        # global workflow sidebar separate session see this run as running --
+        # mirroring how agent/service.py commits running before a skill runs.
+        # Final status is committed by the caller after we return.
+        db.commit()
 
         with open(stdout_path, "w", encoding="utf-8") as fout, \
              open(stderr_path, "w", encoding="utf-8") as ferr, \

@@ -344,6 +344,76 @@ class ApprovalDecision(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Active workflows (global sidebar status): in-progress agent tasks + runs
+# ---------------------------------------------------------------------------
+
+
+class ActiveWorkflowTaskOut(BaseModel):
+    """An agent task for the global workflow-status sidebar.
+
+    `experiment_id` is set only for autonomous experiment tasks (parsed from
+    input_json - no schema change to agent_tasks). `last_message` is the most
+    recent event message so the sidebar can show what the task is doing.
+    `recent` is True for tasks that just reached a terminal state (within the
+    recent window) so the sidebar can show "generate idea -> done" feedback even
+    for fast synchronous tasks that finished between polls.
+    """
+
+    id: str
+    project_id: str
+    task_type: str
+    status: str
+    experiment_id: str | None = None
+    last_message: str | None = None
+    recent: bool = False
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class ActiveWorkflowRunOut(BaseModel):
+    """An in-progress experiment run, for the global workflow-status sidebar."""
+
+    run_id: str
+    experiment_id: str
+    project_id: str
+    command: str | None = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class ActiveWorkflowsOut(BaseModel):
+    tasks: list[ActiveWorkflowTaskOut] = Field(default_factory=list)
+    runs: list[ActiveWorkflowRunOut] = Field(default_factory=list)
+    jobs: list[JobOut] = Field(default_factory=list)
+
+
+class JobOut(BaseModel):
+    """A user-triggered long-running operation (literature search, download,
+    translation, LaTeX compile, benchmark search, ...). Surfaced in the global
+    workflow sidebar so it survives page navigation. `recent` flags the
+    90s finished-tail (same idea as ActiveWorkflowTaskOut.recent)."""
+
+    id: str
+    project_id: str
+    kind: str
+    status: str
+    title: str | None = None
+    target_id: str | None = None
+    target_type: str | None = None
+    message: str | None = None
+    error: str | None = None
+    result_summary: str | None = None
+    recent: bool = False
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+# ---------------------------------------------------------------------------
 # Phase 2: repositories — typed update body (M8)
 # ---------------------------------------------------------------------------
 
@@ -444,6 +514,30 @@ class BenchmarkSearchRequest(BaseModel):
     query: str
     experiment_id: str | None = None
     limit: int = 8
+
+
+class BenchmarkManualCreate(BaseModel):
+    """User-entered benchmark (never-blocked fallback when HF is unreachable)."""
+
+    name: str = Field(min_length=1, max_length=300)
+    kind: Literal["dataset", "task", "sota"] = "dataset"
+    url: str | None = None
+    task_name: str | None = None
+    dataset_name: str | None = None
+    metric_name: str | None = None
+    metric_value: float | None = None
+    experiment_id: str | None = None
+
+
+class BenchmarkSearchResponse(BaseModel):
+    """Benchmark search result + any source-level warnings (timeouts/etc.).
+
+    Warnings let the UI distinguish "no benchmarks match" from "the source was
+    unreachable" so an empty list isn't misleading.
+    """
+
+    benchmarks: list[BenchmarkOut] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
 
 
 class CodegenRequest(BaseModel):

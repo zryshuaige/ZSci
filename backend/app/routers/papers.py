@@ -96,6 +96,19 @@ async def download_paper(
             422, "Download requires explicit user approval (confirmed=true)."
         )
 
+    # Track the download as a global Job so the sidebar shows it (downloads can
+    # take seconds for large PDFs and used to vanish on navigation). Start the
+    # Job BEFORE creating the Paper row so its committed row doesn't accidentally
+    # persist a not-yet-downloaded Paper (start_job commits; a prior flush of the
+    # Paper in the same session would ride along).
+    from app.jobs import finish_job_in_fresh_session, start_job, update_job
+
+    job = start_job(
+        db, project_id=project_id, kind="paper_download",
+        title=f"下载论文: {payload.title or payload.paper_id}", target_id=payload.paper_id, target_type="paper",
+        message="正在下载 PDF",
+    )
+
     paper = db.get(Paper, payload.paper_id)
     if paper is None:
         paper = Paper(
@@ -125,7 +138,8 @@ async def download_paper(
     except DownloadError as exc:
         # H1: rollback FIRST to release the SQLite write lock, THEN persist the
         # error audit in a separate session. Doing it the other way around
-        # deadlocks on SQLite's single-writer lock.
+        # deadlocks on SQLite's single-writer lock. The same rollback would undo
+        # the Job's terminal update, so mark it failed in a fresh session too.
         db.rollback()
         if exc.audit_action:
             from app.pdf.download import _audit_failure_separately
@@ -136,8 +150,10 @@ async def download_paper(
                 target=exc.audit_target or "",
                 payload=exc.audit_payload or {},
             )
+        finish_job_in_fresh_session(job.id, status="failed", error=str(exc))
         raise HTTPException(400, str(exc)) from exc
     db.commit()
+    update_job(db, job.id, status="completed", result_summary="下载完成")
     db.refresh(paper)
     return _to_out(paper)
 
@@ -225,6 +241,14 @@ def parse_paper(paper_id: str, db: Session = Depends(get_db)) -> ParseResponse:
     project = db.get(Project, paper.project_id)
     if project is None:
         raise HTTPException(404, "Project not found")
+
+    from app.jobs import start_job, update_job
+
+    job = start_job(
+        db, project_id=project.id, kind="paper_parse",
+        title=f"解析 PDF: {paper.title or paper_id}", target_id=paper.id, target_type="paper",
+        message="正在解析 PDF",
+    )
     try:
         result = parse_pdf(db, _ws, paper=paper, project_slug=project.slug)
     except ParseError as exc:
@@ -232,8 +256,10 @@ def parse_paper(paper_id: str, db: Session = Depends(get_db)) -> ParseResponse:
         # so the UI shows "error" instead of staying "pending" forever. The old
         # rollback here undid that flush and defeated the L28 fix.
         paper.parse_status = "error"
+        update_job(db, job.id, status="failed", error=str(exc))
         db.commit()
         raise HTTPException(400, str(exc)) from exc
+    update_job(db, job.id, status="completed", result_summary=f"解析完成,{result.get('pages', 0)} 页")
     db.commit()
     return ParseResponse(**result)
 

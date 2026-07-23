@@ -98,10 +98,52 @@ export default function WritingPage() {
   const compileMutation = useMutation({
     mutationFn: () => api.compileWriting(project.id),
     onSuccess: (data) => {
-      if (data.ok) setCompileSeq((n) => n + 1);
+      // compile is now backgrounded server-side; it returns a job_id. Track it
+      // via the shared ["workflows","active"] query (polled globally) to learn
+      // when it finishes, then refresh the PDF preview.
+      setLastCompileResult(null);
+      setLastCompileError(null);
+      setCompileJobId(data.job_id ?? null);
       qc.invalidateQueries({ queryKey: ["citations", project.id] });
     },
   });
+
+  // Observe our compile job's status through the shared active-workflows cache.
+  const [compileJobId, setCompileJobId] = useState<string | null>(null);
+  // "done" | "failed" | null — the outcome of the last compile, kept around so
+  // the preview stays shown after the job leaves the active window.
+  const [lastCompileResult, setLastCompileResult] = useState<"done" | "failed" | null>(null);
+  const [lastCompileError, setLastCompileError] = useState<string | null>(null);
+  const { data: active } = useQuery({
+    queryKey: ["workflows", "active"],
+    queryFn: () => api.listActiveWorkflows(),
+    refetchInterval: (q) => {
+      const d = q.state.data;
+      const mine = d?.jobs.find((j) => j.id === compileJobId);
+      const mineActive = mine && !mine.recent;
+      return compileJobId && (mineActive || d === undefined) ? 2000 : false;
+    },
+    enabled: !!compileJobId,
+  });
+  const compileJob = active?.jobs.find((j) => j.id === compileJobId) ?? null;
+  // When the job reaches a terminal state, refresh the preview (+ citations)
+  // and cache the outcome so it survives the job leaving the recent window.
+  useEffect(() => {
+    if (!compileJob || compileJob.recent === undefined) return;
+    if (!compileJob.recent) return; // still active
+    if (compileJob.status === "completed") {
+      setCompileSeq((n) => n + 1);
+      setLastCompileResult("done");
+      setLastCompileError(null);
+      setCompileJobId(null);
+      qc.invalidateQueries({ queryKey: ["citations", project.id] });
+    } else if (compileJob.status === "failed" || compileJob.status === "stopped") {
+      setLastCompileResult("failed");
+      setLastCompileError(compileJob.error);
+      setCompileJobId(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [compileJob?.status, compileJob?.recent]);
 
   const draftMutation = useMutation({
     mutationFn: () =>
@@ -171,9 +213,13 @@ export default function WritingPage() {
               <Sparkles className="h-4 w-4" />
               {draftMutation.isPending ? "生成草稿…" : "Agent 草稿"}
             </Button>
-            <Button size="sm" onClick={() => compileMutation.mutate()} disabled={compileMutation.isPending}>
+            <Button size="sm" onClick={() => compileMutation.mutate()} disabled={compileMutation.isPending || !!compileJobId}>
               <Play className="h-4 w-4" />
-              {compileMutation.isPending ? "编译中…" : "编译 PDF"}
+              {compileMutation.isPending
+                ? "提交中…"
+                : compileJobId
+                  ? "编译中…"
+                  : "编译 PDF"}
             </Button>
           </>
         )}
@@ -255,19 +301,28 @@ export default function WritingPage() {
           <aside className="w-80 shrink-0 border-l border-border bg-card flex flex-col">
             <div className="border-b border-border p-2 text-xs font-medium">PDF 预览</div>
             <div className="flex-1 overflow-auto bg-muted/30">
-              {compileMutation.data?.ok ? (
-                /* key by the compile run's timestamp so a successful recompile
-                   (same URL, new PDF on disk) forces the iframe to reload
-                   instead of showing the cached previous build. */
+              {compileJobId ? (
+                <div className="p-3 text-xs text-blue-600 flex items-center gap-2">
+                  <Spinner className="h-3.5 w-3.5" />
+                  正在后台编译(laTeX,最多 2 分钟)…侧栏同步显示进度。
+                </div>
+              ) : lastCompileResult === "done" ? (
+                /* key by the compile sequence so a successful recompile (same
+                   URL, new PDF on disk) forces the iframe to reload instead of
+                   showing the cached previous build. */
                 <iframe
                   key={compileSeq}
                   src={api.writingPdfUrl(project.id)}
                   className="w-full h-full min-h-96"
                   title="pdf"
                 />
+              ) : lastCompileResult === "failed" ? (
+                <div className="p-3 text-xs text-destructive">
+                  编译失败:{lastCompileError || "请检查源文件或确认本地已安装 TeX 环境。"}
+                </div>
               ) : (
                 <div className="p-3 text-xs text-muted-foreground">
-                  {compileMutation.data?.error || "点击「编译 PDF」生成预览。需本地 TeX 环境。"}
+                  点击「编译 PDF」生成预览。需本地 TeX 环境;编译在后台进行,可切页,侧栏会显示进度。
                 </div>
               )}
             </div>

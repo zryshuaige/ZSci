@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { useOutletContext } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { useOutletContext, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Play, CheckCircle, XCircle, Clock, AlertTriangle } from "lucide-react";
 import { api, type Project } from "@/lib/api";
@@ -21,7 +21,15 @@ const STATUS_META: Record<string, { color: string; icon: React.ComponentType<{ c
 export default function AgentPage() {
   const { project } = useOutletContext<{ project: Project }>();
   const qc = useQueryClient();
-  const [selectedTask, setSelectedTask] = useState<string | null>(null);
+  // Restore the selected task from the URL (`?task=`) so the global workflow
+  // sidebar can deep-link here and land on the in-progress task instead of a
+  // blank page. Syncs when the param changes (e.g. clicking another workflow).
+  const [searchParams] = useSearchParams();
+  const [selectedTask, setSelectedTask] = useState<string | null>(searchParams.get("task"));
+  useEffect(() => {
+    const t = searchParams.get("task");
+    if (t) setSelectedTask(t);
+  }, [searchParams]);
   const [request, setRequest] = useState(project.research_direction || "");
 
   const runTrend = useMutation({

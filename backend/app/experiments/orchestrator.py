@@ -115,16 +115,23 @@ async def _stage_benchmarks(task_id, experiment_id, project_id, query) -> None:
     if not query:
         return
     # find_and_store_benchmarks is sync (httpx.Client); run off the event loop.
+    warnings: list[str] = []
     def _do():
         with _sessions()() as db:
             rows = find_and_store_benchmarks(
-                db, project_id=project_id, query=query, experiment_id=experiment_id, limit=8
+                db, project_id=project_id, query=query, experiment_id=experiment_id,
+                limit=8, warnings=warnings,
             )
             db.commit()
             return rows
     rows = await asyncio.to_thread(_do)
     sota = [r for r in rows if r.kind == "sota"]
     with _sessions()() as db:
+        # Surface source failures (timeouts/mirror fallback) so the user knows
+        # why benchmark results may be thin - a silent empty list looks like the
+        # agent did nothing.
+        for w in warnings:
+            _emit(db, task_id, "warning", w)
         _emit(db, task_id, "step", f"阶段 1/5 完成:找到 {len(rows)} 个 benchmark(SOTA {len(sota)})", {
             "benchmarks": [{"name": r.name, "kind": r.kind, "metric": r.metric_name, "value": r.metric_value} for r in rows],
         })

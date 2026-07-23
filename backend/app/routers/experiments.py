@@ -13,15 +13,21 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.db.models import AgentTask, Benchmark, Experiment, ExperimentRun, Project, RunMetric
 from app.db.session import get_db
-from app.experiments.benchmarks import find_and_store_benchmarks
+from app.experiments.benchmarks import (
+    create_manual_benchmark,
+    delete_benchmark,
+    find_and_store_benchmarks,
+)
 from app.experiments.codegen import generate_experiment_code
 from app.experiments.orchestrator import run_autonomous_experiment
 from app.experiments.runner import run_experiment, stop_run, tail_log
 from app.experiments.scaffold import scaffold_experiment
 from app.llm.gateway import ModelNotConfigured
 from app.schemas import (
+    BenchmarkManualCreate,
     BenchmarkOut,
     BenchmarkSearchRequest,
+    BenchmarkSearchResponse,
     CodegenRequest,
     CodegenResponse,
     ExperimentCreate,
@@ -283,22 +289,46 @@ def list_runs(exp_id: str, db: Session = Depends(get_db)) -> list[RunOut]:
 # ---------------------------------------------------------------------------
 
 
-@router.post("/api/v1/projects/{project_id}/benchmarks", response_model=list[BenchmarkOut])
+@router.post("/api/v1/projects/{project_id}/benchmarks", response_model=BenchmarkSearchResponse)
 def search_benchmarks(
     project_id: str, payload: BenchmarkSearchRequest, db: Session = Depends(get_db)
-) -> list[BenchmarkOut]:
-    """Find + store benchmarks (datasets/tasks/SOTA) for a research direction."""
+) -> BenchmarkSearchResponse:
+    """Find + store benchmarks (datasets/tasks/SOTA) for a research direction.
+
+    Returns the stored rows plus any source-level warnings (e.g. a benchmark
+    source timed out) so the UI can surface why results may be empty. Tracked as
+    a global Job: HuggingFace can take seconds (esp. with the mirror fallback),
+    and this used to vanish when navigating away.
+    """
     if db.get(Project, project_id) is None:
         raise HTTPException(404, "Project not found")
-    rows = find_and_store_benchmarks(
-        db,
-        project_id=project_id,
-        query=payload.query,
-        experiment_id=payload.experiment_id,
-        limit=payload.limit,
+    from app.jobs import start_job, update_job
+
+    job = start_job(
+        db, project_id=project_id, kind="benchmark_search",
+        title=f"查找 benchmark: {payload.query}", target_type="writing",
+        message="正在检索 HuggingFace Datasets",
     )
-    db.commit()
-    return [BenchmarkOut.model_validate(r) for r in rows]
+    warnings: list[str] = []
+    try:
+        rows = find_and_store_benchmarks(
+            db,
+            project_id=project_id,
+            query=payload.query,
+            experiment_id=payload.experiment_id,
+            limit=payload.limit,
+            warnings=warnings,
+        )
+        db.commit()
+        summary = f"找到 {len(rows)} 个 benchmark" + (f",但有 {len(warnings)} 条告警" if warnings else "")
+        update_job(db, job.id, status="completed", result_summary=summary)
+        return BenchmarkSearchResponse(
+            benchmarks=[BenchmarkOut.model_validate(r) for r in rows],
+            warnings=warnings,
+        )
+    except Exception as exc:  # noqa: BLE001
+        update_job(db, job.id, status="failed", error=str(exc))
+        raise
 
 
 @router.get("/api/v1/projects/{project_id}/benchmarks", response_model=list[BenchmarkOut])
@@ -309,6 +339,42 @@ def list_benchmarks(project_id: str, db: Session = Depends(get_db)) -> list[Benc
         select(Benchmark).where(Benchmark.project_id == project_id).order_by(Benchmark.created_at.desc())
     ).all()
     return [BenchmarkOut.model_validate(r) for r in rows]
+
+
+@router.post("/api/v1/projects/{project_id}/benchmarks/manual", response_model=BenchmarkOut)
+def add_manual_benchmark(
+    project_id: str, payload: BenchmarkManualCreate, db: Session = Depends(get_db)
+) -> BenchmarkOut:
+    """Add a user-entered benchmark. Never-blocked fallback for when HuggingFace
+    is unreachable: the user records the benchmark/SOTA they already know about
+    (e.g. "ImageNet top-1 acc=0.910"), and the autonomous agent's SOTA
+    comparison can use it."""
+    if db.get(Project, project_id) is None:
+        raise HTTPException(404, "Project not found")
+    row = create_manual_benchmark(
+        db,
+        project_id=project_id,
+        name=payload.name,
+        kind=payload.kind,
+        url=payload.url,
+        task_name=payload.task_name,
+        dataset_name=payload.dataset_name,
+        metric_name=payload.metric_name,
+        metric_value=payload.metric_value,
+        experiment_id=payload.experiment_id,
+    )
+    db.commit()
+    db.refresh(row)
+    return BenchmarkOut.model_validate(row)
+
+
+@router.delete("/api/v1/benchmarks/{benchmark_id}")
+def remove_benchmark(benchmark_id: str, db: Session = Depends(get_db)) -> dict:
+    ok = delete_benchmark(db, benchmark_id)
+    if not ok:
+        raise HTTPException(404, "Benchmark not found")
+    db.commit()
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------
@@ -393,6 +459,10 @@ async def start_autonomous(
         raise HTTPException(404, "Project not found")
 
     input_data = {
+        # experiment_id is stored here (not a FK column on agent_tasks - create_all
+        # doesn't alter existing tables) so GET /workflows/active can deep-link the
+        # sidebar entry back to this experiment.
+        "experiment_id": exp_id,
         "research_question": exp.research_question or payload.get("research_question", ""),
         "selected_papers": payload.get("selected_papers", []),
         "selected_repositories": payload.get("selected_repositories", []),

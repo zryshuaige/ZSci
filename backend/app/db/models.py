@@ -377,3 +377,39 @@ class Benchmark(Base):
     )
     extra_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+
+
+class Job(Base):
+    """A user-triggered long-running operation, for the global workflow sidebar.
+
+    The sidebar (`GET /workflows/active`) lists in-progress Jobs across all
+    projects so navigating away from a slow operation (literature search, paper
+    download, translation, LaTeX compile, benchmark search, ...) doesn't lose
+    it. The key invariant: `start_job` COMMITS the `running` row immediately -
+    not just flush - so the sidebar's separate DB session can read it while the
+    operation is still in-flight in the originating request.
+
+    `kind` values: literature_search | literature_recommend | paper_download |
+    paper_parse | translate | reading_note | latex_compile | benchmark_search |
+    experiment_run | experiment_scaffold | writing_init.
+    `target_type` values: paper | experiment | run | literature | writing - drives
+    the sidebar's deep-link target. `target_id` is the related entity id (if any).
+    """
+
+    __tablename__ = "jobs"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    kind: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String, default="running")
+    # running | completed | failed | stopped
+    title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    target_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    target_type: Mapped[str | None] = mapped_column(String, nullable=True)
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    result_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
