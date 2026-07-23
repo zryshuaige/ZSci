@@ -30,6 +30,20 @@ export default {
         md: "250ms",
         lg: "300ms",
       },
+      /* Z-index tokens — fixed semantic ladder so floating UI never collides.
+         chrome = persistent app chrome (sidebar, header) →
+         floating = hover tooltips, popovers (above chrome) →
+         dropdown = menus attached to buttons (above floating) →
+         modal = dialogs, drawer overlays (above dropdown) →
+         toast = transient notifications (above modal). */
+      zIndex: {
+        chrome: "20",
+        floating: "30",
+        dropdown: "40",
+        tooltip: "55",
+        modal: "50",
+        toast: "60",
+      },
       /* Softer, layered shadows for depth without harshness. */
       boxShadow: {
         soft: "0 1px 2px rgba(0,0,0,0.04), 0 1px 3px rgba(0,0,0,0.05)",

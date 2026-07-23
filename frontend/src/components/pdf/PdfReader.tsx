@@ -589,8 +589,8 @@ export default function PdfReader({
           </button>
           {presetOpen && (
             <>
-              <div className="fixed inset-0 z-30" onClick={() => setPresetOpen(false)} />
-              <div className="absolute left-1/2 -translate-x-1/2 bottom-full mb-2 z-40 w-40 rounded-xl border border-border bg-card shadow-float p-1.5 animate-pop origin-bottom">
+              <div className="fixed inset-0 z-dropdown" onClick={() => setPresetOpen(false)} />
+              <div className="absolute left-1/2 -translate-x-1/2 bottom-full mb-2 z-dropdown w-40 rounded-xl border border-border bg-card shadow-float p-1.5 animate-pop origin-bottom">
                 <button
                   onClick={() => { setManualScale(null); setRailCollapsed(false); setPresetOpen(false); }}
                   className="w-full text-left rounded-lg px-3 py-2 text-xs hover:bg-muted transition-colors duration-sm ease-out"
@@ -632,7 +632,7 @@ export default function PdfReader({
       {/* Selection popover */}
       {selection && (
         <div
-          className="fixed z-40 bg-card border border-border rounded-lg shadow-float p-1 flex gap-1 animate-pop"
+          className="fixed z-dropdown bg-card border border-border rounded-lg shadow-float p-1 flex gap-1 animate-pop"
           style={{
             left: Math.min(selection.x, (typeof window !== "undefined" ? window.innerWidth : 9999) - 200),
             // Clamp top so a selection near the bottom of the viewport doesn't

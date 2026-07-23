@@ -56,7 +56,7 @@ export default function CodePage() {
 
       <Card className="p-4 space-y-3">
         <div className="text-sm text-muted-foreground">
-          选择一篇已下载论文,Agent 会去 GitHub 检索相关仓库并保守判断官方性(design.md §17.2)。
+          选择一篇已下载论文，将检索相关代码仓库，并保守判断是否为官方实现。
         </div>
         <div className="flex gap-2 items-center">
           <select

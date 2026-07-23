@@ -1,8 +1,9 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Link, useNavigate, useOutletContext } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Plus, FlaskConical, Sparkles } from "lucide-react";
+import { Plus, FlaskConical, Sparkles, Loader2 } from "lucide-react";
 import { api, type Project } from "@/lib/api";
+import { experimentStatusLabel } from "@/lib/labels";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { Input, Textarea } from "@/components/ui/Input";
@@ -11,6 +12,14 @@ import { ConfirmDialog } from "@/components/ui/Dialog";
 import { ListSkeleton } from "@/components/ui/Skeleton";
 import { EmptyState } from "@/components/ui/EmptyState";
 import BenchmarksPanel from "@/components/BenchmarksPanel";
+
+function statusClass(status: string, isLiveRunning: boolean): string {
+  if (isLiveRunning || status === "running") return "bg-blue-100 text-blue-800";
+  if (status === "done") return "bg-green-100 text-green-800";
+  if (status === "failed" || status === "smoke_failed") return "bg-red-100 text-red-800";
+  if (status === "generated" || status === "scaffolded") return "bg-amber-100 text-amber-800";
+  return "bg-muted text-muted-foreground";
+}
 
 export default function ExperimentsPage() {
   const { project } = useOutletContext<{ project: Project }>();
@@ -21,8 +30,6 @@ export default function ExperimentsPage() {
   const [rq, setRq] = useState("");
   const [hyp, setHyp] = useState("");
   const [relatedIdeaId, setRelatedIdeaId] = useState<string | null>(null);
-  // When set, creating the experiment also kicks off the autonomous agent and
-  // navigates to the detail page so the user watches the live progress stream.
   const [autonomous, setAutonomous] = useState(false);
 
   const { data: exps = [], isLoading: expsLoading } = useQuery({
@@ -30,11 +37,34 @@ export default function ExperimentsPage() {
     queryFn: () => api.listExperiments(project.id),
   });
 
-  // Ideas feed the "import hypothesis" picker in the create dialog.
   const { data: ideas = [] } = useQuery({
     queryKey: ["ideas", project.id],
     queryFn: () => api.listIdeas(project.id),
   });
+
+  const { data: workflows } = useQuery({
+    queryKey: ["workflows", "active"],
+    queryFn: () => api.listActiveWorkflows(),
+    refetchInterval: 3000,
+  });
+
+  const runningExpIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const r of workflows?.runs ?? []) {
+      if (r.project_id === project.id) ids.add(r.experiment_id);
+    }
+    for (const t of workflows?.tasks ?? []) {
+      if (
+        !t.recent &&
+        t.project_id === project.id &&
+        t.task_type === "experiment.autonomous_run" &&
+        t.experiment_id
+      ) {
+        ids.add(t.experiment_id);
+      }
+    }
+    return ids;
+  }, [workflows, project.id]);
 
   const createMutation = useMutation({
     mutationFn: () =>
@@ -49,25 +79,18 @@ export default function ExperimentsPage() {
       const goAutonomous = autonomous;
       setCreating(false); setTitle(""); setRq(""); setHyp(""); setRelatedIdeaId(null); setAutonomous(false);
       if (goAutonomous) {
-        // Start the task HERE and pass its id to the detail page via query
-        // string, so the detail page's launcher picks it up instead of starting
-        // a SECOND duplicate task. Previously the task_id was discarded and the
-        // user could launch a racing second task from the detail page.
         let taskId: string | null = null;
         try {
           const r = await api.startAutonomous(exp.id, {});
           taskId = r.task_id;
         } catch {
-          taskId = null; // detail page launcher will show the failure state
+          taskId = null;
         }
         navigate(`/projects/${project.id}/experiments/${exp.id}${taskId ? `?task=${taskId}` : ""}`);
       }
     },
   });
 
-  // One-click import: copy an idea's hypothesis/motivation into the experiment
-  // fields and link the idea. Maps idea.hypothesis -> experiment hypothesis,
-  // idea.motivation -> research question (the "why"), idea.title -> experiment title.
   const importIdea = (ideaId: string) => {
     const idea = ideas.find((i) => i.id === ideaId);
     if (!idea) return;
@@ -78,54 +101,71 @@ export default function ExperimentsPage() {
   };
 
   return (
-    <div className="p-8 max-w-5xl mx-auto space-y-5">
-      <div className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold tracking-tight">实验工作台</h1>
-        <Button onClick={() => setCreating(true)}><Plus className="h-4 w-4" /> 新建实验</Button>
+    <div className="h-full flex flex-col min-h-0">
+      <div className="shrink-0 px-6 pt-6 pb-3 flex items-center justify-between gap-4">
+        <div className="min-w-0">
+          <h1 className="text-xl font-semibold tracking-tight">实验工作台</h1>
+          <p className="text-xs text-muted-foreground mt-1 leading-relaxed">
+            左侧查找并加入数据集基准，右侧创建与跟踪实验。运行中的实验会标出「运行中」。
+          </p>
+        </div>
+        <Button onClick={() => setCreating(true)} className="shrink-0">
+          <Plus className="h-4 w-4" /> 新建实验
+        </Button>
       </div>
 
-      <Card className="p-3 text-xs text-muted-foreground">
-        新建实验会在项目目录下生成 uv + pyproject.toml 的 Python 实验骨架(src/train.py、configs、scripts、runs)。
-        Agent 不自动安装依赖、不自动运行;运行命令需用户确认(design.md §16.2)。stdout 中形如{" "}
-        <code className="bg-muted px-1 rounded">METRIC step=&lt;n&gt; &lt;name&gt;=&lt;value&gt;</code> 的行会被解析为指标曲线。
-        支持从「研究想法」一键导入 idea。
-      </Card>
+      <div className="flex flex-1 min-h-0 flex-col lg:flex-row gap-4 px-6 pb-6">
+        <aside className="w-full lg:w-80 xl:w-96 shrink-0 flex flex-col min-h-0 max-h-[42vh] lg:max-h-none">
+          <BenchmarksPanel projectId={project.id} compact className="flex-1 h-full" />
+        </aside>
 
-      <BenchmarksPanel projectId={project.id} />
+        <main className="flex-1 min-w-0 min-h-0 overflow-y-auto">
+          <div className="text-xs font-medium text-muted-foreground mb-2.5">
+            我的实验
+            {!expsLoading && <span className="ml-1 opacity-70">({exps.length})</span>}
+          </div>
 
-      {expsLoading ? (
-        <ListSkeleton rows={3} />
-      ) : exps.length === 0 ? (
-        <EmptyState
-          icon={<FlaskConical className="h-10 w-10" />}
-          title="还没有实验"
-          subtitle="点击「新建实验」创建,会自动生成 uv + pyproject.toml 骨架"
-        />
-      ) : (
-        <div className="grid gap-3">
-          {exps.map((e) => (
-            <Link key={e.id} to={`/projects/${project.id}/experiments/${e.id}`}>
-              <Card className="p-4 hover:shadow-md transition-shadow">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <div className="font-medium">{e.title}</div>
-                    {e.research_question && (
-                      <div className="text-sm text-muted-foreground line-clamp-1">{e.research_question}</div>
-                    )}
-                    <div className="text-xs text-muted-foreground mt-1 font-mono">{e.slug}</div>
-                  </div>
-                  <Badge className={
-                    e.status === "done" ? "bg-green-100 text-green-800" :
-                    e.status === "failed" || e.status === "smoke_failed" ? "bg-red-100 text-red-800" :
-                    e.status === "generated" || e.status === "scaffolded" ? "bg-amber-100 text-amber-800" :
-                    "bg-blue-100 text-blue-800"
-                  }>{e.status}</Badge>
-                </div>
-              </Card>
-            </Link>
-          ))}
-        </div>
-      )}
+          {expsLoading ? (
+            <ListSkeleton rows={3} />
+          ) : exps.length === 0 ? (
+            <EmptyState
+              icon={<FlaskConical className="h-10 w-10" />}
+              title="还没有实验"
+              subtitle="点击「新建实验」开始，可从研究想法一键导入假设"
+            />
+          ) : (
+            <div className="grid gap-3">
+              {exps.map((e) => {
+                const live = runningExpIds.has(e.id);
+                return (
+                  <Link key={e.id} to={`/projects/${project.id}/experiments/${e.id}`}>
+                    <Card className={`p-4 hover:shadow-md transition-shadow ${live ? "ring-1 ring-blue-200" : ""}`}>
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="font-medium truncate flex items-center gap-2">
+                            {e.title}
+                            {live && (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin text-blue-600 shrink-0" />
+                            )}
+                          </div>
+                          {e.research_question && (
+                            <div className="text-sm text-muted-foreground line-clamp-1 mt-0.5">
+                              {e.research_question}
+                            </div>
+                          )}
+                        </div>
+                        <Badge className={`shrink-0 ${statusClass(e.status, live)}`}>
+                          {live ? "运行中" : experimentStatusLabel(e.status)}
+                        </Badge>
+                      </div>
+                    </Card>
+                  </Link>
+                );
+              })}
+            </div>
+          )}
+        </main>
+      </div>
 
       <ConfirmDialog
         open={creating}
@@ -135,16 +175,16 @@ export default function ExperimentsPage() {
           <div className="space-y-2">
             {ideas.length > 0 && (
               <div className="space-y-1">
-                <label className="text-xs text-muted-foreground">从研究想法导入(可选)</label>
+                <label className="text-xs text-muted-foreground">从研究想法导入（可选）</label>
                 <select
                   className="h-9 w-full rounded-md border border-input bg-background px-2 text-sm"
                   value={relatedIdeaId || ""}
                   onChange={(e) => (e.target.value ? importIdea(e.target.value) : setRelatedIdeaId(null))}
                 >
-                  <option value="">不导入,手动填写</option>
+                  <option value="">不导入，手动填写</option>
                   {ideas.map((i) => (
                     <option key={i.id} value={i.id}>
-                      {i.title || "(未命名)"} · {i.hypothesis?.slice(0, 40) || "(无 idea)"}
+                      {i.title || "（未命名）"} · {i.hypothesis?.slice(0, 40) || "（无假设）"}
                     </option>
                   ))}
                 </select>
@@ -153,7 +193,7 @@ export default function ExperimentsPage() {
             <Input placeholder="实验名称" value={title} onChange={(e) => setTitle(e.target.value)} />
             <Textarea placeholder="研究问题" rows={2} value={rq} onChange={(e) => setRq(e.target.value)} />
             <Textarea
-              placeholder="idea(核心想法,待验证)"
+              placeholder="核心假设（待验证的想法）"
               rows={2}
               value={hyp}
               onChange={(e) => setHyp(e.target.value)}
@@ -165,12 +205,14 @@ export default function ExperimentsPage() {
                 onChange={(e) => setAutonomous(e.target.checked)}
               />
               <Sparkles className="h-3.5 w-3.5 text-amber-500" />
-              创建后立即启动自主实验 Agent(查 benchmark {">"} 生成代码 {">"} smoke 自修复 {">"} 跑实验)
+              创建后启动自主实验助手（查找基准 → 生成代码 → 自检 → 运行）
             </label>
-            <div className="text-xs text-muted-foreground">将在本地生成 uv 实验项目骨架。</div>
+            <div className="text-xs text-muted-foreground">
+              将在本地为该实验创建独立的可运行项目目录。
+            </div>
           </div>
         }
-        confirmLabel={autonomous ? "创建并启动自主实验" : "创建"}
+        confirmLabel={autonomous ? "创建并启动" : "创建"}
         onCancel={() => { setCreating(false); setAutonomous(false); }}
         onConfirm={() => title.trim() && createMutation.mutate()}
       />

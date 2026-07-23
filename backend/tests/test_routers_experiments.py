@@ -197,37 +197,49 @@ def test_benchmark_search_surfaces_warnings_on_timeout(client, project, monkeypa
     monkeypatch.setattr(bm, "_http_get_json", _fail)
 
     resp = client.post(
-        f"/api/v1/projects/{project['id']}/benchmarks",
+        f"/api/v1/projects/{project['id']}/benchmarks/search",
         json={"query": "image classification"},
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert body["benchmarks"] == []
+    assert body["hits"] == []
     assert len(body["warnings"]) >= 1
     assert "timed out" in body["warnings"][0]
+    # Search must not persist rows.
+    assert client.get(f"/api/v1/projects/{project['id']}/benchmarks").json() == []
 
 
-def test_benchmark_search_returns_benchmarks(client, project, monkeypatch):
-    """A successful search returns stored benchmark rows + no warnings."""
+def test_benchmark_search_returns_hits_without_storing(client, project, monkeypatch):
+    """Search returns ephemeral hits; library stays empty until /add."""
     from app.experiments import benchmarks as bm
 
     def _ok(url, params, *, endpoints=None, warnings=None):
         if url == bm.HF_DATASETS_PATH:
             return [{"id": "mnist"}]
-        return None  # PWC: empty
+        return None
 
     monkeypatch.setattr(bm, "_http_get_json", _ok)
 
     resp = client.post(
-        f"/api/v1/projects/{project['id']}/benchmarks",
+        f"/api/v1/projects/{project['id']}/benchmarks/search",
         json={"query": "image classification"},
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["warnings"] == []
-    assert len(body["benchmarks"]) == 1
-    assert body["benchmarks"][0]["name"] == "mnist"
-    assert body["benchmarks"][0]["source"] == "hf"
+    assert len(body["hits"]) == 1
+    assert body["hits"][0]["name"] == "mnist"
+    assert body["hits"][0]["source"] == "hf"
+    assert client.get(f"/api/v1/projects/{project['id']}/benchmarks").json() == []
+
+    add = client.post(
+        f"/api/v1/projects/{project['id']}/benchmarks/add",
+        json=body["hits"][0],
+    )
+    assert add.status_code == 200, add.text
+    lst = client.get(f"/api/v1/projects/{project['id']}/benchmarks").json()
+    assert len(lst) == 1
+    assert lst[0]["name"] == "mnist"
 
 
 def test_manual_benchmark_create_and_delete(client, project):

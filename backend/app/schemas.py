@@ -233,6 +233,8 @@ class HealthOut(BaseModel):
     status: str
     version: str
     workspace: str
+    db_ok: bool = True
+    db_error: str | None = None
 
 
 class SettingsOut(BaseModel):
@@ -298,6 +300,18 @@ class RepositoryOut(BaseModel):
 class AgentTaskCreate(BaseModel):
     task_type: str
     input: dict = Field(default_factory=dict)
+
+
+class AgentTaskStartResponse(BaseModel):
+    """Response for POST /projects/{id}/agent/tasks.
+
+    Async (default): only `task_id` + `job_id` are populated; the caller
+    polls `/workflows/active` or `/agent/tasks/{id}` for status.
+    Sync (?sync=1, tests only): `task` carries the full row.
+    """
+    task_id: str
+    job_id: str
+    task: AgentTaskOut | None = None
 
 
 class AgentTaskOut(BaseModel):
@@ -378,6 +392,7 @@ class ActiveWorkflowRunOut(BaseModel):
     run_id: str
     experiment_id: str
     project_id: str
+    experiment_title: str | None = None
     command: str | None = None
     created_at: datetime
 
@@ -505,7 +520,47 @@ class BenchmarkOut(BaseModel):
     metric_name: str | None
     metric_value: float | None
     paper_id: str | None
+    # Enrichment (populated in app/experiments/benchmarks.py from the HF
+    # detail endpoint, or supplied by the user when creating a manual benchmark).
+    # Stored in `extra_json` on the model — these fields are derived on the way
+    # out so the wire format doesn't depend on the column being migrated.
+    description: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    downloads: int | None = None
+    is_mainstream: bool = False
+    author: str | None = None
     created_at: datetime
+
+    @classmethod
+    def from_row(cls, row) -> "BenchmarkOut":
+        """Validate from a SQLAlchemy row, merging extra_json into the
+        enrichment fields (description / tags / downloads / is_mainstream /
+        author). Tolerates malformed extra_json without raising."""
+        import json
+        try:
+            data = json.loads(row.extra_json) if row.extra_json else {}
+        except (ValueError, TypeError):
+            data = {}
+        return cls(
+            id=row.id,
+            project_id=row.project_id,
+            experiment_id=row.experiment_id,
+            name=row.name,
+            kind=row.kind,
+            source=row.source,
+            url=row.url,
+            task_name=row.task_name,
+            dataset_name=row.dataset_name,
+            metric_name=row.metric_name,
+            metric_value=row.metric_value,
+            paper_id=row.paper_id,
+            description=data.get("description") if isinstance(data, dict) else None,
+            tags=[str(t) for t in (data.get("tags") or [])] if isinstance(data, dict) else [],
+            downloads=(data.get("downloads") if isinstance(data, dict) else None),
+            is_mainstream=bool(data.get("is_mainstream")) if isinstance(data, dict) else False,
+            author=(data.get("author") if isinstance(data, dict) else None),
+            created_at=row.created_at,
+        )
 
     model_config = {"from_attributes": True}
 
@@ -514,6 +569,65 @@ class BenchmarkSearchRequest(BaseModel):
     query: str
     experiment_id: str | None = None
     limit: int = 8
+
+
+class BenchmarkHitOut(BaseModel):
+    """Ephemeral HF search hit — not persisted until the user adds it."""
+
+    name: str
+    kind: str = "dataset"
+    source: str = "hf"
+    url: str | None = None
+    task_name: str | None = None
+    dataset_name: str | None = None
+    metric_name: str | None = None
+    metric_value: float | None = None
+    description: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    downloads: int | None = None
+    is_mainstream: bool = False
+    author: str | None = None
+
+    @classmethod
+    def from_hit(cls, hit: dict) -> "BenchmarkHitOut":
+        return cls(
+            name=str(hit.get("name") or ""),
+            kind=str(hit.get("kind") or "dataset"),
+            source=str(hit.get("source") or "hf"),
+            url=hit.get("url"),
+            task_name=hit.get("task_name"),
+            dataset_name=hit.get("dataset_name"),
+            metric_name=hit.get("metric_name"),
+            metric_value=hit.get("metric_value"),
+            description=hit.get("description"),
+            tags=[str(t) for t in (hit.get("tags") or [])],
+            downloads=hit.get("downloads"),
+            is_mainstream=bool(hit.get("is_mainstream")),
+            author=hit.get("author"),
+        )
+
+
+class BenchmarkAddRequest(BaseModel):
+    """Persist a search hit (or equivalent fields) into the project library."""
+
+    name: str = Field(min_length=1, max_length=300)
+    kind: Literal["dataset", "task", "sota"] = "dataset"
+    source: str = "hf"
+    url: str | None = None
+    task_name: str | None = None
+    dataset_name: str | None = None
+    metric_name: str | None = None
+    metric_value: float | None = None
+    experiment_id: str | None = None
+    description: str | None = Field(default=None, max_length=1000)
+    tags: list[str] = Field(default_factory=list, max_length=20)
+    downloads: int | None = None
+    is_mainstream: bool = False
+    author: str | None = None
+
+
+class BenchmarkUpdate(BaseModel):
+    experiment_id: str | None = None
 
 
 class BenchmarkManualCreate(BaseModel):
@@ -527,17 +641,21 @@ class BenchmarkManualCreate(BaseModel):
     metric_name: str | None = None
     metric_value: float | None = None
     experiment_id: str | None = None
+    description: str | None = Field(default=None, max_length=1000)
+    tags: list[str] = Field(default_factory=list, max_length=10)
+    is_mainstream: bool = False
 
 
 class BenchmarkSearchResponse(BaseModel):
-    """Benchmark search result + any source-level warnings (timeouts/etc.).
+    """Search-only response: ephemeral hits + source warnings.
 
-    Warnings let the UI distinguish "no benchmarks match" from "the source was
-    unreachable" so an empty list isn't misleading.
+    `benchmarks` is kept as an alias of `hits` for older clients; prefer `hits`.
     """
 
-    benchmarks: list[BenchmarkOut] = Field(default_factory=list)
+    hits: list[BenchmarkHitOut] = Field(default_factory=list)
+    benchmarks: list[BenchmarkHitOut] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    query_used: list[str] = Field(default_factory=list)
 
 
 class CodegenRequest(BaseModel):

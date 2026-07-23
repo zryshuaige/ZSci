@@ -1,11 +1,13 @@
 import { useEffect, useState } from "react";
 import { useOutletContext } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { FileText, Play, Sparkles, CheckCircle, AlertTriangle, ChevronDown } from "lucide-react";
+import { FileText, Play, Sparkles, CheckCircle, AlertTriangle, ChevronDown, Loader2 } from "lucide-react";
 import { api, type Project } from "@/lib/api";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { Spinner } from "@/components/ui/Dialog";
+import { ShortcutTooltip } from "@/components/ui/Tooltip";
+import { useAgentTaskStatus } from "@/lib/hooks/useAgentTaskStatus";
 
 export default function WritingPage() {
   const { project } = useOutletContext<{ project: Project }>();
@@ -72,18 +74,47 @@ export default function WritingPage() {
     }
   }, [filesResp, currentPath]);
 
-  // M4: track dirty state so we can warn before switching files and losing
-  // unsaved edits.
+  // M4: track dirty state so we can show the "● 未保存" indicator + title
+  // dot and warn before window-close. We don't auto-prompt on file switch —
+  // switching files is a deliberate user action and they can always click
+  // back. The dirty flag is still useful for the title bar / Cmd+S feedback.
   const isDirty = !!currentPath && !!fileQuery.data && content !== fileQuery.data.content;
-  const switchFile = (path: string) => {
-    if (isDirty && !window.confirm(`放弃对 ${currentPath} 的未保存修改?`)) return;
-    setCurrentPath(path);
-  };
+  const switchFile = (path: string) => setCurrentPath(path);
 
   const saveMutation = useMutation({
     mutationFn: () => api.putWritingFile(project.id, currentPath!, content),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["writing-file", project.id, currentPath] }),
   });
+
+  // Cmd/Ctrl+S to save when the editor is focused. Avoids stealing the
+  // shortcut when the user is inside an Input/dialog (those are HTML <input>
+  // children which already have their own native handling).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") {
+        e.preventDefault();
+        if (currentPath && !saveMutation.isPending && content !== fileQuery.data?.content) {
+          saveMutation.mutate();
+        }
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentPath, content, saveMutation.isPending, fileQuery.data?.content]);
+
+  // Warn before window close / refresh if there are unsaved edits. Modern
+  // browsers ignore the custom message but still show their own "Leave site?"
+  // dialog when returnValue is set.
+  useEffect(() => {
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (!isDirty) return;
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [isDirty]);
 
   const initMutation = useMutation({
     mutationFn: (args: { template: string; force?: boolean }) =>
@@ -148,18 +179,37 @@ export default function WritingPage() {
   const draftMutation = useMutation({
     mutationFn: () =>
       api.runAgentTask(project.id, "writing.draft_section", { section_name: "related_work" }),
-    onSuccess: () => {
+    onSuccess: (task) => {
+      // The synchronous endpoint created the draft + returned the terminal
+      // task. Refresh the affected lists so the new file/notes appear.
       qc.invalidateQueries({ queryKey: ["writing-files", project.id] });
       qc.invalidateQueries({ queryKey: ["citations", project.id] });
+      qc.invalidateQueries({ queryKey: ["workflows", "active"] });
+      if (task?.id) setActiveDraftTaskId(task.id);
     },
   });
+
+  // Track the most recent draft task so the button stays in "running" state
+  // through the sidebar's recent window (avoids the "submitted → idle →
+  // waiting" flicker while the user reads the result).
+  const [activeDraftTaskId, setActiveDraftTaskId] = useState<string | null>(null);
+  const draftStatus = useAgentTaskStatus(
+    activeDraftTaskId,
+    () => {
+      setActiveDraftTaskId(null);
+    },
+  );
+  const isDraftRunning = draftMutation.isPending || draftStatus.isActive || draftStatus.isTerminal;
 
   const files = filesResp?.files ?? [];
 
   return (
     <div className="flex flex-col h-full">
-      <div className="border-b border-border bg-card px-4 py-2 flex items-center gap-2 shrink-0">
-        <h1 className="font-semibold flex-1">论文写作</h1>
+      <div className="relative z-chrome border-b border-border bg-card px-4 py-2 flex items-center gap-2 shrink-0">
+        <h1 className="font-semibold flex-1">
+          论文写作
+          {isDirty && <span className="text-amber-600 ml-1.5 text-sm" title="有未保存的修改">●</span>}
+        </h1>
         {files.length === 0 && (
           <span className="text-xs text-muted-foreground">
             {initMutation.isPending ? "初始化中…" : "选择下方模板开始"}
@@ -181,21 +231,25 @@ export default function WritingPage() {
               </Button>
               {tplMenuOpen && (
                 <>
-                  <div className="fixed inset-0 z-30" onClick={() => setTplMenuOpen(false)} />
-                  <div className="absolute right-0 top-full mt-1 z-40 w-64 rounded-xl border border-border bg-card shadow-float p-1.5 animate-pop origin-top-right">
+                  <div className="fixed inset-0 z-dropdown" onClick={() => setTplMenuOpen(false)} />
+                  <div className="absolute right-0 top-full mt-1 z-dropdown w-64 rounded-xl border border-border bg-card shadow-float p-1.5 animate-pop origin-top-right">
                     {templates.map((t) => (
                       <button
                         key={t.key}
                         onClick={() => {
                           setTplMenuOpen(false);
                           if (t.key === currentTemplate) return;
+                          // Only confirm when there are local edits worth losing;
+                          // otherwise the template switch is a no-op for the user.
                           if (
-                            window.confirm(
-              `切换到「${t.label}」?\n\n将覆盖 main.tex(文档类与导言区),章节内容与 references.bib 会保留。`
+                            isDirty &&
+                            !window.confirm(
+                              `切换到「${t.label}」?\n\n将覆盖 main.tex(文档类与导言区),章节内容与 references.bib 会保留,且当前 main.tex 有未保存的修改会丢失。`
                             )
                           ) {
-                            initMutation.mutate({ template: t.key, force: true });
+                            return;
                           }
+                          initMutation.mutate({ template: t.key, force: true });
                         }}
                         className={`w-full text-left rounded-lg px-3 py-2 text-sm transition-colors duration-sm ease-out hover:bg-muted ${
                           t.key === currentTemplate ? "bg-muted font-medium" : ""
@@ -209,9 +263,13 @@ export default function WritingPage() {
                 </>
               )}
             </div>
-            <Button size="sm" variant="outline" onClick={() => draftMutation.mutate()} disabled={draftMutation.isPending}>
-              <Sparkles className="h-4 w-4" />
-              {draftMutation.isPending ? "生成草稿…" : "Agent 草稿"}
+            <Button size="sm" variant="outline" onClick={() => draftMutation.mutate()} disabled={isDraftRunning}>
+              {isDraftRunning ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Sparkles className="h-4 w-4" />
+              )}
+              {isDraftRunning ? "生成草稿…" : "Agent 草稿"}
             </Button>
             <Button size="sm" onClick={() => compileMutation.mutate()} disabled={compileMutation.isPending || !!compileJobId}>
               <Play className="h-4 w-4" />
@@ -284,9 +342,11 @@ export default function WritingPage() {
             <div className="flex items-center gap-2 border-b border-border px-3 py-1 text-xs text-muted-foreground shrink-0">
               <span className="font-mono">{currentPath}</span>
               {isDirty && <span className="text-amber-600">● 未保存</span>}
-              <Button size="sm" variant="outline" onClick={() => saveMutation.mutate()} disabled={!currentPath || saveMutation.isPending}>
-                保存
-              </Button>
+              <ShortcutTooltip content="保存" shortcut="⌘S">
+                <Button size="sm" variant="outline" onClick={() => saveMutation.mutate()} disabled={!currentPath || saveMutation.isPending}>
+                  保存
+                </Button>
+              </ShortcutTooltip>
               {saveMutation.isSuccess && !isDirty && <span className="text-green-600 text-xs">已保存</span>}
             </div>
             <textarea

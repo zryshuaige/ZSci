@@ -163,42 +163,75 @@ def generate_hypothesis(db: Session, state: ResearchAgentState) -> ResearchAgent
 
     project_id = state["project_id"]
     for h in hypotheses:
+        if not isinstance(h, dict):
+            continue
+        fields = _normalize_hypothesis(h)
         db.add(
             Idea(
                 id=new_id("idea"),
                 project_id=project_id,
-                title=_idea_title(h),
-                hypothesis=h.get("hypothesis") or h.get("problem") or "",
-                motivation=h.get("motivation") or "",
+                title=fields["title"],
+                hypothesis=fields["hypothesis"],
+                motivation=fields["motivation"],
                 status="hypothesis",
-                evidence_json=json.dumps(h.get("evidence"), ensure_ascii=False) if h.get("evidence") else None,
-                risks_json=json.dumps(h.get("risks") or h.get("counterexamples"), ensure_ascii=False),
+                evidence_json=fields["evidence_json"],
+                risks_json=fields["risks_json"],
                 content=json.dumps(h, ensure_ascii=False, indent=2),
             )
         )
     db.flush()
-    state["final_response"] = f"生成了 {len(hypotheses)} 个 idea,已保存到研究想法库。"
+    state["final_response"] = f"生成了 {len(hypotheses)} 个研究想法，已保存到研究想法库。"
     return state
 
 
-def _idea_title(h: dict) -> str:
-    """Pick a title the model actually generated, never a placeholder.
+def _first_str(h: dict, *keys: str) -> str:
+    for k in keys:
+        v = h.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+        if isinstance(v, list) and v:
+            parts = [str(x).strip() for x in v if str(x).strip()]
+            if parts:
+                return "；".join(parts)
+    return ""
 
-    Preference: explicit name/title field. If the model omitted one, derive a
-    concise title from its own hypothesis/problem text (truncated) rather than
-    falling back to a generic "未命名 idea" - the user asked the AI to name
-    each idea itself.
-    """
-    name = (h.get("name") or h.get("title") or "").strip()
+
+def _normalize_hypothesis(h: dict) -> dict:
+    """Map varied LLM field names into Idea columns."""
+    hypothesis = _first_str(
+        h,
+        "hypothesis",
+        "problem",
+        "claim",
+        "idea",
+        "核心假设",
+        "假设",
+    )
+    motivation = _first_str(h, "motivation", "动机")
+    title = _idea_title(h, hypothesis=hypothesis, motivation=motivation)
+
+    evidence = h.get("evidence") or h.get("文献证据")
+    risks = h.get("risks") or h.get("counterexamples") or h.get("反例与风险") or h.get("风险")
+
+    return {
+        "title": title,
+        "hypothesis": hypothesis,
+        "motivation": motivation,
+        "evidence_json": json.dumps(evidence, ensure_ascii=False) if evidence else None,
+        "risks_json": json.dumps(risks, ensure_ascii=False) if risks else None,
+    }
+
+
+def _idea_title(h: dict, *, hypothesis: str = "", motivation: str = "") -> str:
+    """Pick a title the model actually generated, never a placeholder."""
+    name = (h.get("name") or h.get("title") or h.get("标题") or "").strip()
     if name:
         return name
-    body = (h.get("hypothesis") or h.get("problem") or h.get("motivation") or "").strip()
+    body = hypothesis or motivation or _first_str(h, "hypothesis", "problem", "motivation")
     if body:
-        # Take the first clause / ~24 chars so the list view shows something
-        # meaningful the AI itself produced.
         first_clause = body.split("。", 1)[0].split("；", 1)[0].split(";", 1)[0]
         first_clause = first_clause.replace("\n", " ").strip()
         if len(first_clause) > 24:
             return first_clause[:24] + "…"
-        return first_clause or "未命名 idea"
-    return "未命名 idea"
+        return first_clause or "未命名想法"
+    return "未命名想法"

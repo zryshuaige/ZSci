@@ -19,11 +19,15 @@ HYPOTHESIS_SYSTEM = (
     "你是科研假设生成助手。基于用户提供的论文证据,提出可验证的研究假设。\n\n"
     "规则:\n"
     "1. 假设必须基于已提供的论文证据,不得凭空捏造。\n"
-    "2. 每个假设必须先给出一个 name 字段:简短、描述性的中文标题(10-20 字,概括这个假设的核心主张),"
-    "由你自行拟定,不要使用「未命名」之类的占位词。\n"
-    "3. 每个假设还需指明:动机、文献证据(带 paper_id)、反例与风险、最小可行实验、对照组、变量、评估指标、成功判据、失败判据、资源预算。\n"
+    "2. 每个假设必须先给出 name:简短、描述性的中文标题(10-20 字),不要使用「未命名」等占位词。\n"
+    "3. 每个假设必须使用以下英文字段名(值用中文撰写):\n"
+    "   name, hypothesis(核心可验证主张,1-3 句),"
+    "motivation(动机), evidence(文献证据数组,含 paper_id/claim),"
+    "risks(风险与反例数组), min_viable_experiment(最小可行实验),"
+    "controls(对照组), variables(变量), metrics(评估指标数组或字符串),"
+    "success_criteria(成功判据), failure_criteria(失败判据), resource_budget(资源预算)。\n"
     "4. 区分【事实】【推断】【假设】【待验证】。\n\n"
-    "以 JSON 输出:hypotheses(数组,每个含 name 及上述字段),evidence。"
+    "严格以 JSON 输出,顶层字段:hypotheses(数组), evidence。"
 )
 
 # --- Official code search (§17.2) ---

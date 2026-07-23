@@ -1,3 +1,5 @@
+import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -6,24 +8,13 @@ import {
 } from "lucide-react";
 import { api, type ActiveWorkflowTask, type ActiveWorkflowRun, type Job } from "@/lib/api";
 import { cn } from "@/lib/cn";
+import { Tooltip } from "@/components/ui/Tooltip";
+import {
+  agentStatusLabel,
+  agentTaskLabel,
+  jobDisplayTitle,
+} from "@/lib/labels";
 
-/** Global workflow indicator, mounted in the left sidebar so it survives page
- * navigation.
- *
- * The backend keeps autonomous experiments + agent tasks running even when the
- * user navigates away (orchestrator uses asyncio.create_task; sync agent tasks
- * run in the threadpool). The problem this solves: the streaming panels held
- * the task id in component state, so leaving the page looked like the workflow
- * "exited". This sidebar lists every active task/run across all projects and
- * deep-links back to the right page, so a running workflow is always visible
- * and reachable.
- *
- * The section is ALWAYS rendered (with a header) so it's discoverable even when
- * idle. It also shows recently-finished tasks for ~90s (the `recent` flag) so
- * fast synchronous tasks like "生成 idea" leave a visible trace even if they
- * completed between polls. Polls every 2s while workflows are active, 4s when
- * idle.
- */
 export default function WorkflowStatus({ collapsed }: { collapsed: boolean }) {
   const navigate = useNavigate();
   const { data } = useQuery({
@@ -44,32 +35,146 @@ export default function WorkflowStatus({ collapsed }: { collapsed: boolean }) {
 
   const activeTasks = (data?.tasks ?? []).filter((t) => !t.recent);
   const recentTasks = (data?.tasks ?? []).filter((t) => t.recent);
-  const activeJobs = (data?.jobs ?? []).filter((j) => !j.recent);
-  const recentJobs = (data?.jobs ?? []).filter((j) => j.recent);
+  // Hide agent_task jobs when the matching agent task is already listed.
+  const taskIds = new Set((data?.tasks ?? []).map((t) => t.id));
+  const activeJobs = (data?.jobs ?? []).filter(
+    (j) => !j.recent && !(j.kind === "agent_task" && j.target_id && taskIds.has(j.target_id)),
+  );
+  const recentJobs = (data?.jobs ?? []).filter(
+    (j) => j.recent && !(j.kind === "agent_task" && j.target_id && taskIds.has(j.target_id)),
+  );
   const runs = data?.runs ?? [];
   const activeCount = activeTasks.length + activeJobs.length + runs.length;
 
+  const go = (href: string) => navigate(href);
+
   if (collapsed) {
-    // Collapsed: always show an activity icon (discoverable); pulse + badge when
-    // something is actually running.
     return (
-      <div className="px-2 py-2">
+      <CollapsedActivity
+        activeCount={activeCount}
+        activeTasks={activeTasks}
+        activeJobs={activeJobs}
+        runs={runs}
+        recentTasks={recentTasks}
+        recentJobs={recentJobs}
+        onNavigate={go}
+      />
+    );
+  }
+
+  return (
+    <div className="px-2 py-2 space-y-1">
+      <div className="px-1 flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
+        {activeCount > 0 ? (
+          <span className="relative flex h-2 w-2">
+            <span className="absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75 animate-ping" />
+            <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500" />
+          </span>
+        ) : (
+          <Activity className="h-3 w-3" />
+        )}
+        进行中的任务
+        {activeCount > 0 && <span className="text-blue-600">{activeCount}</span>}
+      </div>
+
+      {activeTasks.length === 0 && runs.length === 0 && activeJobs.length === 0 && recentTasks.length === 0 && recentJobs.length === 0 && (
+        <div className="px-1 py-1 text-[11px] text-muted-foreground/70">暂无进行中的任务</div>
+      )}
+
+      <TaskList
+        activeTasks={activeTasks}
+        activeJobs={activeJobs}
+        runs={runs}
+        recentTasks={recentTasks}
+        recentJobs={recentJobs}
+        onNavigate={go}
+      />
+    </div>
+  );
+}
+
+function CollapsedActivity({
+  activeCount,
+  activeTasks,
+  activeJobs,
+  runs,
+  recentTasks,
+  recentJobs,
+  onNavigate,
+}: {
+  activeCount: number;
+  activeTasks: ActiveWorkflowTask[];
+  activeJobs: Job[];
+  runs: ActiveWorkflowRun[];
+  recentTasks: ActiveWorkflowTask[];
+  recentJobs: Job[];
+  onNavigate: (href: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const btnRef = useRef<HTMLButtonElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
+
+  const items =
+    activeCount > 0
+      ? activeCount
+      : recentTasks.length + recentJobs.length;
+
+  useEffect(() => {
+    if (!open) return;
+    const place = () => {
+      const r = btnRef.current?.getBoundingClientRect();
+      if (!r) return;
+      setPos({ top: r.top, left: r.right + 8 });
+    };
+    place();
+    const onDoc = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (btnRef.current?.contains(t) || panelRef.current?.contains(t)) return;
+      setOpen(false);
+    };
+    window.addEventListener("scroll", place, true);
+    window.addEventListener("resize", place);
+    document.addEventListener("mousedown", onDoc);
+    return () => {
+      window.removeEventListener("scroll", place, true);
+      window.removeEventListener("resize", place);
+      document.removeEventListener("mousedown", onDoc);
+    };
+  }, [open]);
+
+  const handleClick = () => {
+    const total =
+      activeTasks.length + activeJobs.length + runs.length + recentTasks.length + recentJobs.length;
+    if (total === 0) return;
+    if (total === 1) {
+      const only =
+        activeTasks[0] ? linkForTask(activeTasks[0])
+        : activeJobs[0] ? linkForJob(activeJobs[0])
+        : runs[0] ? linkForRun(runs[0])
+        : recentTasks[0] ? linkForTask(recentTasks[0])
+        : recentJobs[0] ? linkForJob(recentJobs[0])
+        : null;
+      if (only) onNavigate(only);
+      return;
+    }
+    setOpen((v) => !v);
+  };
+
+  const tip =
+    activeCount > 0
+      ? `进行中的任务（${activeCount}）· 点击查看`
+      : items > 0
+        ? "最近完成的任务 · 点击查看"
+        : "暂无进行中的任务";
+
+  return (
+    <div className="px-2 py-2">
+      <Tooltip content={tip} side="right">
         <button
-          onClick={() => {
-            const first = activeTasks[0] ?? activeJobs[0] ?? null;
-            if (first && "task_type" in first) navigate(linkForTask(first));
-            else if (first && "kind" in first) navigate(linkForJob(first));
-            else if (runs[0]) navigate(linkForRun(runs[0]));
-            else if (recentTasks[0]) navigate(linkForTask(recentTasks[0]));
-            else if (recentJobs[0]) navigate(linkForJob(recentJobs[0]));
-          }}
-          title={
-            activeCount > 0
-              ? `${activeCount} 个进行中工作流`
-              : recentTasks.length > 0
-                ? "工作流(最近完成)"
-                : "工作流(无进行中)"
-          }
+          ref={btnRef}
+          type="button"
+          onClick={handleClick}
           className={cn(
             "relative flex h-9 w-9 mx-auto items-center justify-center rounded-md transition-colors duration-sm ease-out",
             activeCount > 0
@@ -88,62 +193,88 @@ export default function WorkflowStatus({ collapsed }: { collapsed: boolean }) {
             </span>
           )}
         </button>
-      </div>
-    );
-  }
-
-  return (
-    <div className="px-2 py-2 space-y-1">
-      <div className="px-1 flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
-        {activeCount > 0 ? (
-          <span className="relative flex h-2 w-2">
-            <span className="absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75 animate-ping" />
-            <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500" />
-          </span>
-        ) : (
-          <Activity className="h-3 w-3" />
-        )}
-        工作流
-        {activeCount > 0 && <span className="text-blue-600">{activeCount} 进行中</span>}
-      </div>
-
-      {activeTasks.length === 0 && runs.length === 0 && activeJobs.length === 0 && recentTasks.length === 0 && recentJobs.length === 0 && (
-        <div className="px-1 py-1 text-[11px] text-muted-foreground/70">暂无进行中工作流</div>
+      </Tooltip>
+      {open && pos && createPortal(
+        <div
+          ref={panelRef}
+          style={{ position: "fixed", top: pos.top, left: pos.left, zIndex: 60 }}
+          className="w-64 max-h-80 overflow-y-auto rounded-lg border border-border bg-card shadow-float p-2 space-y-1 animate-pop"
+        >
+          <div className="px-1 pb-1 text-[11px] font-medium text-muted-foreground">
+            {activeCount > 0 ? `进行中的任务（${activeCount}）` : "最近完成"}
+          </div>
+          <TaskList
+            activeTasks={activeTasks}
+            activeJobs={activeJobs}
+            runs={runs}
+            recentTasks={recentTasks}
+            recentJobs={recentJobs}
+            onNavigate={(href) => {
+              setOpen(false);
+              onNavigate(href);
+            }}
+          />
+        </div>,
+        document.body,
       )}
+    </div>
+  );
+}
 
+function TaskList({
+  activeTasks,
+  activeJobs,
+  runs,
+  recentTasks,
+  recentJobs,
+  onNavigate,
+}: {
+  activeTasks: ActiveWorkflowTask[];
+  activeJobs: Job[];
+  runs: ActiveWorkflowRun[];
+  recentTasks: ActiveWorkflowTask[];
+  recentJobs: Job[];
+  onNavigate: (href: string) => void;
+}) {
+  return (
+    <>
       {activeTasks.map((t) => (
-        <WorkflowRow key={t.id} t={t} onClick={() => navigate(linkForTask(t))} />
+        <WorkflowRow key={t.id} t={t} onClick={() => onNavigate(linkForTask(t))} />
       ))}
       {activeJobs.map((j) => (
-        <JobRow key={j.id} j={j} onClick={() => navigate(linkForJob(j))} />
+        <JobRow key={j.id} j={j} onClick={() => onNavigate(linkForJob(j))} />
       ))}
       {runs.map((r) => (
         <button
           key={r.run_id}
-          onClick={() => navigate(linkForRun(r))}
-          title={r.command || "运行中"}
+          type="button"
+          onClick={() => onNavigate(linkForRun(r))}
           className="w-full text-left flex items-start gap-2 rounded-md px-2 py-1.5 text-xs text-muted-foreground hover:bg-muted hover:text-foreground transition-colors duration-sm ease-out active:scale-[0.98]"
         >
           <Play className="h-3.5 w-3.5 mt-0.5 shrink-0 text-emerald-500" />
           <span className="min-w-0 flex-1">
-            <span className="block truncate font-medium text-foreground">实验运行中</span>
-            <span className="block truncate text-[11px] text-muted-foreground/80 font-mono">{r.command || r.run_id.slice(0, 10)}</span>
+            <span className="block truncate font-medium text-foreground">
+              实验运行中
+              {r.experiment_title ? ` · ${r.experiment_title}` : ""}
+            </span>
+            <span className="block truncate text-[11px] text-muted-foreground/80">
+              点击查看进度
+            </span>
           </span>
         </button>
       ))}
-
       {(recentTasks.length > 0 || recentJobs.length > 0) && (
         <>
-          <div className="px-1 pt-1 text-[10px] uppercase tracking-wide text-muted-foreground/50">最近完成</div>
+          <div className="px-1 pt-1 text-[10px] text-muted-foreground/50">最近完成</div>
           {recentTasks.map((t) => (
-            <WorkflowRow key={t.id} t={t} onClick={() => navigate(linkForTask(t))} />
+            <WorkflowRow key={t.id} t={t} onClick={() => onNavigate(linkForTask(t))} />
           ))}
           {recentJobs.map((j) => (
-            <JobRow key={j.id} j={j} onClick={() => navigate(linkForJob(j))} />
+            <JobRow key={j.id} j={j} onClick={() => onNavigate(linkForJob(j))} />
           ))}
         </>
       )}
-    </div>
+    </>
   );
 }
 
@@ -153,8 +284,8 @@ function WorkflowRow({ t, onClick }: { t: ActiveWorkflowTask; onClick: () => voi
   const done = t.status === "completed";
   return (
     <button
+      type="button"
       onClick={onClick}
-      title={t.last_message || t.task_type}
       className={cn(
         "w-full text-left flex items-start gap-2 rounded-md px-2 py-1.5 text-xs hover:bg-muted transition-colors duration-sm ease-out active:scale-[0.98]",
         isRecent ? "text-muted-foreground/70" : "text-muted-foreground hover:text-foreground",
@@ -169,10 +300,10 @@ function WorkflowRow({ t, onClick }: { t: ActiveWorkflowTask; onClick: () => voi
       )}
       <span className="min-w-0 flex-1">
         <span className={cn("block truncate", !isRecent && "font-medium text-foreground")}>
-          {labelForTask(t)}
+          {agentTaskLabel(t.task_type)}
           {isRecent && (
             <span className={cn("ml-1", failed ? "text-red-500" : done ? "text-green-600" : "text-muted-foreground")}>
-              {failed ? "失败" : done ? "完成" : t.status}
+              {agentStatusLabel(t.status)}
             </span>
           )}
         </span>
@@ -184,58 +315,29 @@ function WorkflowRow({ t, onClick }: { t: ActiveWorkflowTask; onClick: () => voi
   );
 }
 
-function labelForTask(t: ActiveWorkflowTask): string {
-  switch (t.task_type) {
-    case "experiment.autonomous_run":
-      return "自主实验";
-    case "research.trend_analysis":
-      return "研究趋势分析";
-    case "research.generate_hypothesis":
-      return "生成 idea";
-    case "code.search_github":
-      return "GitHub 代码检索";
-    case "writing.draft_section":
-      return "写作起草";
-    default:
-      return t.task_type.split(".").pop() || t.task_type;
-  }
-}
-
-function linkForTask(t: ActiveWorkflowTask): string {
-  if (t.task_type === "experiment.autonomous_run" && t.experiment_id) {
-    return `/projects/${t.project_id}/experiments/${t.experiment_id}?task=${t.id}`;
-  }
-  return `/projects/${t.project_id}/agent?task=${t.id}`;
-}
-
-function linkForRun(r: ActiveWorkflowRun): string {
-  return `/projects/${r.project_id}/experiments/${r.experiment_id}`;
-}
-
-/** A generic long-running operation (literature search, download, parse,
- *  translation, reading note, LaTeX compile, benchmark search). */
-const JOB_META: Record<string, { icon: React.ComponentType<{ className?: string }>; label: string }> = {
-  literature_search: { icon: Search, label: "文献检索" },
-  literature_recommend: { icon: BookOpen, label: "相似文献推荐" },
-  paper_download: { icon: Download, label: "论文下载" },
-  paper_parse: { icon: FileText, label: "PDF 解析" },
-  translate: { icon: Languages, label: "翻译" },
-  reading_note: { icon: NotebookPen, label: "阅读笔记" },
-  latex_compile: { icon: FileCode, label: "LaTeX 编译" },
-  benchmark_search: { icon: Search, label: "Benchmark 查找" },
-  writing_init: { icon: FileCode, label: "写作初始化" },
+const JOB_ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
+  literature_search: Search,
+  literature_recommend: BookOpen,
+  paper_download: Download,
+  paper_parse: FileText,
+  translate: Languages,
+  reading_note: NotebookPen,
+  latex_compile: FileCode,
+  benchmark_search: Search,
+  writing_init: FileCode,
+  agent_task: Bot,
 };
 
 function JobRow({ j, onClick }: { j: Job; onClick: () => void }) {
   const isRecent = j.recent;
   const failed = ["failed", "stopped"].includes(j.status);
   const done = j.status === "completed";
-  const meta = JOB_META[j.kind] ?? { icon: Activity, label: j.kind };
-  const Icon = meta.icon;
+  const Icon = JOB_ICONS[j.kind] ?? Activity;
+  const title = jobDisplayTitle(j.title, j.kind);
   return (
     <button
+      type="button"
       onClick={onClick}
-      title={j.message || j.title || j.kind}
       className={cn(
         "w-full text-left flex items-start gap-2 rounded-md px-2 py-1.5 text-xs hover:bg-muted transition-colors duration-sm ease-out active:scale-[0.98]",
         isRecent ? "text-muted-foreground/70" : "text-muted-foreground hover:text-foreground",
@@ -252,10 +354,10 @@ function JobRow({ j, onClick }: { j: Job; onClick: () => void }) {
       )}
       <span className="min-w-0 flex-1">
         <span className={cn("block truncate", !isRecent && "font-medium text-foreground")}>
-          {j.title || meta.label}
+          {title}
           {isRecent && (
             <span className={cn("ml-1", failed ? "text-red-500" : done ? "text-green-600" : "text-muted-foreground")}>
-              {failed ? "失败" : done ? "完成" : j.status}
+              {agentStatusLabel(j.status)}
             </span>
           )}
         </span>
@@ -270,9 +372,22 @@ function JobRow({ j, onClick }: { j: Job; onClick: () => void }) {
   );
 }
 
+function linkForTask(t: ActiveWorkflowTask): string {
+  if (t.task_type === "experiment.autonomous_run" && t.experiment_id) {
+    return `/projects/${t.project_id}/experiments/${t.experiment_id}?task=${t.id}`;
+  }
+  return `/projects/${t.project_id}/agent?task=${t.id}`;
+}
+
+function linkForRun(r: ActiveWorkflowRun): string {
+  return `/projects/${r.project_id}/experiments/${r.experiment_id}`;
+}
+
 function linkForJob(j: Job): string {
-  // Deep-link back to the page that owns the operation, using the target.
   const pid = j.project_id;
+  if (j.target_type === "agent_task" && j.target_id) {
+    return `/projects/${pid}/agent?task=${j.target_id}`;
+  }
   if (j.target_type === "paper" && j.target_id) {
     return `/projects/${pid}/papers/${j.target_id}`;
   }
@@ -288,9 +403,11 @@ function linkForJob(j: Job): string {
   if (j.target_type === "writing") {
     return `/projects/${pid}/writing`;
   }
-  // Benchmark search lives on the experiments page.
   if (j.kind === "benchmark_search") {
     return `/projects/${pid}/experiments`;
+  }
+  if (j.kind === "agent_task") {
+    return `/projects/${pid}/agent`;
   }
   return `/projects/${pid}`;
 }

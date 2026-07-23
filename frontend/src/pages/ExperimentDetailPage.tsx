@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useParams, useSearchParams } from "react-router-dom";
 import { Play, Square } from "lucide-react";
 import { api, type Metric, type Run } from "@/lib/api";
+import { runStatusLabel } from "@/lib/labels";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
@@ -73,19 +74,18 @@ export default function ExperimentDetailPage() {
         {exp.research_question && <p className="text-sm text-muted-foreground">{exp.research_question}</p>}
         {exp.hypothesis && (
           <p className="text-sm mt-1">
-            <span className="text-muted-foreground">idea:</span> {exp.hypothesis}
+            <span className="text-muted-foreground">假设：</span> {exp.hypothesis}
           </p>
         )}
-        <div className="text-xs text-muted-foreground mt-1 font-mono">{exp.root_path}</div>
       </div>
 
       <AutonomousLauncher expId={expId!} initialTaskId={initialTaskId} />
 
       <Card className="p-4 space-y-3">
-        <div className="font-medium text-sm">运行命令(手动)</div>
+        <div className="font-medium text-sm">手动运行</div>
         <Textarea rows={2} value={command} onChange={(e) => setCommand(e.target.value)} className="font-mono text-xs" />
         <div className="flex gap-2 items-center">
-          <Input placeholder="seed" value={seed} onChange={(e) => setSeed(e.target.value)} className="w-32" />
+          <Input placeholder="随机种子" value={seed} onChange={(e) => setSeed(e.target.value)} className="w-32" />
           <Button onClick={() => setConfirming(true)} disabled={!!running || runMutation.isPending}>
             <Play className="h-4 w-4" /> 运行
           </Button>
@@ -101,12 +101,12 @@ export default function ExperimentDetailPage() {
           )}
           {stopMutation.isError && (
             <span className="text-xs text-destructive">
-              停止失败:{(stopMutation.error as Error).message}
+              停止失败：{(stopMutation.error as Error).message}
             </span>
           )}
         </div>
         <div className="text-xs text-muted-foreground">
-          ⚠️ 命令将在实验目录执行,占用本地计算资源。Agent 不直接执行 shell,需你确认(design.md §16.2)。
+          命令会在本机实验目录执行并占用算力，需你确认后才会开始。
         </div>
       </Card>
 
@@ -116,9 +116,9 @@ export default function ExperimentDetailPage() {
         busy={runMutation.isPending}
         description={
           <div className="text-sm space-y-1">
-            <div>工作目录:<code className="bg-muted px-1 rounded text-xs">{exp.slug}</code></div>
-            <div>命令:<code className="bg-muted px-1 rounded text-xs break-all">{command}</code></div>
-            <div>seed:{seed}</div>
+            <div>工作目录：<code className="bg-muted px-1 rounded text-xs">{exp.slug}</code></div>
+            <div>命令：<code className="bg-muted px-1 rounded text-xs break-all">{command}</code></div>
+            <div>随机种子：{seed}</div>
           </div>
         }
         confirmLabel="确认运行"
@@ -128,15 +128,20 @@ export default function ExperimentDetailPage() {
 
       <div className="grid gap-3">
         <div className="font-medium">运行记录</div>
-        {runs.map((r) => (
+        {runs.map((r, idx) => (
           <Card key={r.id} className="p-3">
             <div className="flex items-center justify-between">
-              <div className="font-mono text-xs">{r.id}</div>
+              <div className="text-xs text-muted-foreground">
+                运行 #{runs.length - idx}
+                {r.created_at && (
+                  <span className="ml-2">{new Date(r.created_at).toLocaleString()}</span>
+                )}
+              </div>
               <Badge className={
                 r.status === "completed" ? "bg-green-100 text-green-800" :
                 r.status === "failed" || r.status === "stopped" ? "bg-red-100 text-red-800" :
                 "bg-blue-100 text-blue-800"
-              }>{r.status}</Badge>
+              }>{runStatusLabel(r.status)}</Badge>
             </div>
             <div className="text-xs text-muted-foreground mt-1 break-all">{r.command}</div>
             {(r.status === "running" || activeRun === r.id) && <RunStream runId={r.id} expId={expId!} />}
@@ -218,7 +223,7 @@ function RunStream({ runId, expId }: { runId: string; expId: string }) {
   return (
     <div className="mt-2">
       <pre ref={ref} className="text-xs bg-black text-green-300 p-2 rounded max-h-64 overflow-auto font-mono">
-        {logs || "(等待输出…)"}{done && "\n[run ended]"}
+        {logs || "（等待输出…）"}{done && "\n【运行已结束】"}
       </pre>
       {disconnected && !done && (
         <div className="text-xs text-amber-600 mt-1">
@@ -277,7 +282,7 @@ function CompareRuns({ runs }: { runs: Run[] }) {
 
   return (
     <Card className="p-4">
-      <div className="font-medium mb-2">实验对比(design.md §12.3)</div>
+      <div className="font-medium mb-2">实验对比</div>
       <div className="flex gap-2 flex-wrap mb-3">
         {runs.map((r) => (
           <label key={r.id} className="text-xs flex items-center gap-1">

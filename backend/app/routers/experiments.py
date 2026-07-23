@@ -16,7 +16,10 @@ from app.db.session import get_db
 from app.experiments.benchmarks import (
     create_manual_benchmark,
     delete_benchmark,
-    find_and_store_benchmarks,
+    expand_search_queries,
+    link_benchmark_experiment,
+    search_huggingface_datasets,
+    store_benchmark_hit,
 )
 from app.experiments.codegen import generate_experiment_code
 from app.experiments.orchestrator import run_autonomous_experiment
@@ -24,10 +27,13 @@ from app.experiments.runner import run_experiment, stop_run, tail_log
 from app.experiments.scaffold import scaffold_experiment
 from app.llm.gateway import ModelNotConfigured
 from app.schemas import (
+    BenchmarkAddRequest,
+    BenchmarkHitOut,
     BenchmarkManualCreate,
     BenchmarkOut,
     BenchmarkSearchRequest,
     BenchmarkSearchResponse,
+    BenchmarkUpdate,
     CodegenRequest,
     CodegenResponse,
     ExperimentCreate,
@@ -289,46 +295,59 @@ def list_runs(exp_id: str, db: Session = Depends(get_db)) -> list[RunOut]:
 # ---------------------------------------------------------------------------
 
 
+@router.post("/api/v1/projects/{project_id}/benchmarks/search", response_model=BenchmarkSearchResponse)
 @router.post("/api/v1/projects/{project_id}/benchmarks", response_model=BenchmarkSearchResponse)
 def search_benchmarks(
     project_id: str, payload: BenchmarkSearchRequest, db: Session = Depends(get_db)
 ) -> BenchmarkSearchResponse:
-    """Find + store benchmarks (datasets/tasks/SOTA) for a research direction.
-
-    Returns the stored rows plus any source-level warnings (e.g. a benchmark
-    source timed out) so the UI can surface why results may be empty. Tracked as
-    a global Job: HuggingFace can take seconds (esp. with the mirror fallback),
-    and this used to vanish when navigating away.
-    """
+    """Search HuggingFace only — does NOT persist. User must call /add to keep hits."""
     if db.get(Project, project_id) is None:
         raise HTTPException(404, "Project not found")
     from app.jobs import start_job, update_job
 
     job = start_job(
         db, project_id=project_id, kind="benchmark_search",
-        title=f"查找 benchmark: {payload.query}", target_type="writing",
-        message="正在检索 HuggingFace Datasets",
+        title=f"查找数据集: {payload.query}", target_type="experiment",
+        message="正在检索数据集",
     )
     warnings: list[str] = []
     try:
-        rows = find_and_store_benchmarks(
-            db,
-            project_id=project_id,
-            query=payload.query,
-            experiment_id=payload.experiment_id,
-            limit=payload.limit,
-            warnings=warnings,
+        queries = expand_search_queries(payload.query)
+        hits = search_huggingface_datasets(
+            payload.query, limit=payload.limit, warnings=warnings
         )
-        db.commit()
-        summary = f"找到 {len(rows)} 个 benchmark" + (f",但有 {len(warnings)} 条告警" if warnings else "")
+        summary = f"找到 {len(hits)} 个候选" + (f"，{len(warnings)} 条告警" if warnings else "")
         update_job(db, job.id, status="completed", result_summary=summary)
+        hit_outs = [BenchmarkHitOut.from_hit(h) for h in hits]
         return BenchmarkSearchResponse(
-            benchmarks=[BenchmarkOut.model_validate(r) for r in rows],
+            hits=hit_outs,
+            benchmarks=hit_outs,
             warnings=warnings,
+            query_used=queries,
         )
     except Exception as exc:  # noqa: BLE001
         update_job(db, job.id, status="failed", error=str(exc))
         raise
+
+
+@router.post("/api/v1/projects/{project_id}/benchmarks/add", response_model=BenchmarkOut)
+def add_benchmark_from_hit(
+    project_id: str, payload: BenchmarkAddRequest, db: Session = Depends(get_db)
+) -> BenchmarkOut:
+    """Persist a search hit into the project library (optional experiment link)."""
+    if db.get(Project, project_id) is None:
+        raise HTTPException(404, "Project not found")
+    if payload.experiment_id and db.get(Experiment, payload.experiment_id) is None:
+        raise HTTPException(404, "Experiment not found")
+    row = store_benchmark_hit(
+        db,
+        project_id=project_id,
+        hit=payload.model_dump(),
+        experiment_id=payload.experiment_id,
+    )
+    db.commit()
+    db.refresh(row)
+    return BenchmarkOut.from_row(row)
 
 
 @router.get("/api/v1/projects/{project_id}/benchmarks", response_model=list[BenchmarkOut])
@@ -338,7 +357,35 @@ def list_benchmarks(project_id: str, db: Session = Depends(get_db)) -> list[Benc
     rows = db.scalars(
         select(Benchmark).where(Benchmark.project_id == project_id).order_by(Benchmark.created_at.desc())
     ).all()
-    return [BenchmarkOut.model_validate(r) for r in rows]
+    outs = [BenchmarkOut.from_row(r) for r in rows]
+    # Mainstream first for the project library view.
+    outs.sort(
+        key=lambda b: (
+            0 if b.is_mainstream else 1,
+            -(b.downloads or 0),
+            (b.name or "").lower(),
+        )
+    )
+    return outs
+
+
+@router.patch("/api/v1/benchmarks/{benchmark_id}", response_model=BenchmarkOut)
+def update_benchmark(
+    benchmark_id: str, payload: BenchmarkUpdate, db: Session = Depends(get_db)
+) -> BenchmarkOut:
+    if payload.experiment_id is not None and payload.experiment_id != "":
+        if db.get(Experiment, payload.experiment_id) is None:
+            raise HTTPException(404, "Experiment not found")
+    exp_id = payload.experiment_id if payload.experiment_id else None
+    # Allow explicit unlink via null
+    if "experiment_id" not in payload.model_fields_set:
+        raise HTTPException(400, "experiment_id required")
+    row = link_benchmark_experiment(db, benchmark_id, exp_id)
+    if row is None:
+        raise HTTPException(404, "Benchmark not found")
+    db.commit()
+    db.refresh(row)
+    return BenchmarkOut.from_row(row)
 
 
 @router.post("/api/v1/projects/{project_id}/benchmarks/manual", response_model=BenchmarkOut)
@@ -362,10 +409,13 @@ def add_manual_benchmark(
         metric_name=payload.metric_name,
         metric_value=payload.metric_value,
         experiment_id=payload.experiment_id,
+        description=payload.description,
+        tags=payload.tags,
+        is_mainstream=payload.is_mainstream,
     )
     db.commit()
     db.refresh(row)
-    return BenchmarkOut.model_validate(row)
+    return BenchmarkOut.from_row(row)
 
 
 @router.delete("/api/v1/benchmarks/{benchmark_id}")

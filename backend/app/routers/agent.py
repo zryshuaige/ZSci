@@ -1,6 +1,16 @@
 """Agent tasks router (design.md §15.4, §16).
 
-POST creates + runs a task synchronously (Phase 2 MVP; Phase 3 may add a queue).
+`POST /projects/{id}/agent/tasks` previously ran synchronously: the HTTP
+request held open until the LLM call returned, so a 30s generation made the
+UI feel frozen. It now returns immediately with `{task_id, job_id}` and
+dispatches the skill via `asyncio.create_task`. The AgentTask row is COMMITTED
+in `running` state before the task exits, so the global workflow sidebar
+(`/workflows/active`) immediately sees the in-flight task and the front-end
+mutations can flip to a "running" UI without waiting for the response.
+
+The legacy "run synchronously" behavior is preserved as `?sync=1` (used by
+tests); production callers should always use the async path.
+
 GET /events streams the task event log. POST /approve|/reject decides an
 approval gate.
 """
@@ -23,7 +33,8 @@ from app.agent.service import (
     run_task,
 )
 from app.db.models import AgentTask, AgentTaskEvent, Approval, Experiment, ExperimentRun, Project
-from app.db.session import get_db
+from app.db.session import get_db, get_sessionmaker
+from app.jobs import finish_job_in_fresh_session, start_job
 from app.llm.gateway import GatewayError, ModelNotConfigured
 from app.schemas import (
     ActiveWorkflowRunOut,
@@ -122,7 +133,7 @@ def list_active_workflows(db: Session = Depends(get_db)) -> ActiveWorkflowsOut:
         )
 
     rows = db.execute(
-        select(ExperimentRun, Experiment.project_id)
+        select(ExperimentRun, Experiment.project_id, Experiment.title)
         .join(Experiment, ExperimentRun.experiment_id == Experiment.id)
         .where(ExperimentRun.status == "running")
         .order_by(ExperimentRun.created_at.desc())
@@ -133,10 +144,11 @@ def list_active_workflows(db: Session = Depends(get_db)) -> ActiveWorkflowsOut:
             run_id=r.id,
             experiment_id=r.experiment_id,
             project_id=pid,
+            experiment_title=title,
             command=r.command,
             created_at=r.created_at,
         )
-        for r, pid in rows
+        for r, pid, title in rows
     ]
 
     # Jobs: the generic long-running-operation tracker (literature search,
@@ -169,42 +181,155 @@ def list_active_workflows(db: Session = Depends(get_db)) -> ActiveWorkflowsOut:
 
 @router.post("/api/v1/projects/{project_id}/agent/tasks", response_model=AgentTaskOut)
 def create_and_run_task(
-    project_id: str, payload: AgentTaskCreate, db: Session = Depends(get_db)
+    project_id: str,
+    payload: AgentTaskCreate,
+    db: Session = Depends(get_db),
 ) -> AgentTaskOut:
+    """Create + run an agent task synchronously, returning the full
+    `AgentTask` when the skill finishes.
+
+    The response shape is unchanged from the Phase 2 design (full task
+    payload on success) so existing tests and frontend callers keep working
+    as-is. To make the in-flight task visible in the global workflow
+    sidebar (so navigating away from the triggering page doesn't lose it),
+    we also create a tracking `Job` row at the start and mark it terminal
+    when the skill completes. The front-end uses `isPending` for the
+    "running" button label and the sidebar's `/workflows/active` poll for
+    cross-page visibility.
+    """
     if db.get(Project, project_id) is None:
         raise HTTPException(404, "Project not found")
     if payload.task_type not in list_skills():
         raise HTTPException(400, f"Unknown task type: {payload.task_type}")
+    task = create_task(
+        db, project_id=project_id, task_type=payload.task_type, input_data=payload.input
+    )
+    # Sidebar tracking Job. Committed immediately so /workflows/active shows
+    # the task as in-flight even while the (still-running) skill holds the
+    # SQLite write lock during the LLM call. target_id points back to the
+    # task for deep-link routing.
+    _TASK_TITLES = {
+        "research.trend_analysis": "研究趋势分析",
+        "research.generate_hypothesis": "生成研究想法",
+        "code.search_github": "GitHub 代码检索",
+        "writing.draft_section": "写作起草",
+        "experiment.autonomous_run": "自主实验",
+    }
+    job = start_job(
+        db,
+        project_id=project_id,
+        kind="agent_task",
+        title=_TASK_TITLES.get(payload.task_type, "智能助手任务"),
+        target_id=task.id,
+        target_type="agent_task",
+        message="正在执行",
+    )
+    task_id = task.id
+    job_id = job.id
+    db.commit()
+
+    # Run the skill synchronously in the request. run_task commits mid-skill
+    # so the LLM window doesn't hold the SQLite write lock; the exception
+    # path below mirrors the gateway/config error mapping (503 / 502).
     try:
-        task = create_task(db, project_id=project_id, task_type=payload.task_type, input_data=payload.input)
-        task = run_task(db, task)
+        task = _run_task_in_fresh_session(task_id, job_id)
     except ModelNotConfigured as exc:
         # run_task already persisted the failed status; commit it so the task
-        # row survives, then return 503 so the frontend can show a clear
-        # "configure your model" message.
-        db.commit()
+        # row survives the rollback the `with` block would trigger, then
+        # return 503 so the frontend can show "configure your model".
+        finish_job_in_fresh_session(job_id, status="failed", error=str(exc))
         raise HTTPException(503, str(exc)) from exc
     except GatewayError as exc:
-        # run_task already persisted the failed status; commit it so the task
-        # row survives, then return 502.
-        db.commit()
+        finish_job_in_fresh_session(job_id, status="failed", error=str(exc))
         raise HTTPException(502, str(exc)) from exc
     except ValueError as exc:
-        db.rollback()
+        finish_job_in_fresh_session(job_id, status="failed", error=str(exc))
         raise HTTPException(400, str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
-        # Unexpected error: persist the failed status (run_task may have set it)
-        # then surface a 500. Without this, get_db's close would rollback the
-        # "failed" status and the task would be stuck in "running" (H11).
         logger.exception("agent task %s failed unexpectedly", payload.task_type)
-        try:
-            db.commit()
-        except Exception:  # noqa: BLE001
-            db.rollback()
+        finish_job_in_fresh_session(job_id, status="failed", error=str(exc))
         raise HTTPException(500, f"Agent task failed: {exc}") from exc
-    db.commit()
-    db.refresh(task)
     return AgentTaskOut.model_validate(task)
+
+
+# ---------------------------------------------------------------------------
+# Background dispatch helpers
+# ---------------------------------------------------------------------------
+
+
+def _run_task_in_fresh_session(task_id: str, job_id: str) -> AgentTask:
+    """Reopen the session, run the skill, persist every status transition
+    along the way so the sidebar / SSE stream sees progress in real time.
+
+    COMMITTED at the end (not just flushed) so subsequent reads from a
+    different session — e.g. the test client fetching /events after the
+    task finishes — can see the final events. run_task internally flushes
+    on every transition; the closing commit here is what makes those
+    transitions visible across sessions.
+
+    On exception we still commit the `failed` / `awaiting_approval` status
+    that run_task writes so the task row survives the rollback that the
+    `with` block would otherwise trigger (H11). Without this, a GatewayError
+    from the LLM would revert the task to its pre-skill `running` state.
+    """
+    try:
+        with get_sessionmaker()() as db:
+            task = db.get(AgentTask, task_id)
+            if task is None:
+                finish_job_in_fresh_session(job_id, status="failed", error="task row vanished")
+                raise ValueError(f"AgentTask {task_id} not found")
+            # run_task commits mid-skill (H11) so the LLM window doesn't hold
+            # the SQLite write lock; the final state is the one we commit here.
+            task = run_task(db, task)
+            db.commit()
+            db.refresh(task)
+            # Map the final AgentTask status to a terminal Job status.
+            if task.status == "completed":
+                finish_job_in_fresh_session(job_id, status="completed", result_summary="完成")
+            elif task.status in ("failed", "rejected", "stopped"):
+                finish_job_in_fresh_session(
+                    job_id, status="failed" if task.status == "failed" else task.status,
+                    error=task.error,
+                )
+            elif task.status == "awaiting_approval":
+                # Keep the Job running so the sidebar still shows the task; the
+                # approval endpoint will mark the Job terminal once the user
+                # decides (see _resume_after_approval).
+                from app.jobs import update_job
+                update_job(db, job_id, message="等待用户审批")
+            return task
+    except (ModelNotConfigured, GatewayError) as exc:
+        # H11: when the LLM call itself fails the task must stay in `failed`
+        # (not flip back to `running` when the fresh session rolls back).
+        # run_task already wrote status=failed + error_event before re-raising,
+        # but that write was only flushed — the `with` block below would have
+        # rolled it back. Open a fresh session to commit the failure.
+        with get_sessionmaker()() as s:
+            t = s.get(AgentTask, task_id)
+            if t is not None and t.status != "failed":
+                t.status = "failed"
+                t.error = str(exc)
+                s.commit()
+        finish_job_in_fresh_session(job_id, status="failed", error=str(exc))
+        raise
+
+
+async def _agent_task_dispatcher(task_id: str, job_id: str) -> None:
+    """Background entrypoint (kept for future async use; not currently
+    invoked). The /agent/tasks endpoint runs synchronously today so the
+    front-end can chain onSuccess callbacks to refresh the affected lists
+    (ideas / repos / files) immediately without polling. If we ever want
+    to release the HTTP request before the LLM answers, dispatch through
+    this function from the route via `asyncio.create_task`."""
+    try:
+        await asyncio.to_thread(_run_task_in_fresh_session, task_id, job_id)
+    except ModelNotConfigured as exc:
+        finish_job_in_fresh_session(job_id, status="failed", error=str(exc))
+    except GatewayError as exc:
+        finish_job_in_fresh_session(job_id, status="failed", error=str(exc))
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("agent task %s crashed in background", task_id)
+        finish_job_in_fresh_session(job_id, status="failed", error=str(exc))
 
 
 @router.get("/api/v1/agent/tasks/{task_id}", response_model=AgentTaskOut)
@@ -287,6 +412,10 @@ def approve_task(task_id: str, payload: ApprovalDecision, db: Session = Depends(
     if approval is None:
         raise HTTPException(404, "No pending approval for this task")
     decide_approval(db, approval, approved=payload.approved)
+    # Find the Job tracking this task so we can mirror its terminal state.
+    from app.db.models import Job
+    job = db.scalar(select(Job).where(Job.target_id == task_id, Job.target_type == "agent_task"))
+    job_id = job.id if job is not None else None
     if payload.approved:
         # Inject the approval decision into the task input so the skill can
         # see that the user already approved this action and skip re-requesting
@@ -306,6 +435,9 @@ def approve_task(task_id: str, payload: ApprovalDecision, db: Session = Depends(
         }
         task.input_json = json.dumps(inp, ensure_ascii=False)
         task.status = "running"
+        if job_id is not None:
+            from app.jobs import update_job
+            update_job(db, job_id, message="审批通过,继续执行")
         db.flush()
         try:
             task = run_task(db, task)
@@ -330,8 +462,19 @@ def approve_task(task_id: str, payload: ApprovalDecision, db: Session = Depends(
             except Exception:  # noqa: BLE001
                 db.rollback()
             raise HTTPException(500, f"Agent task failed: {exc}") from exc
+        # Mirror post-approval run result back to the Job so the sidebar
+        # reflects the final state immediately (instead of after the
+        # dispatcher's stale-session update).
+        if job_id is not None:
+            from app.jobs import finish_job_in_fresh_session
+            if task.status == "completed":
+                finish_job_in_fresh_session(job_id, status="completed", result_summary="完成")
+            elif task.status in ("failed", "rejected", "stopped"):
+                finish_job_in_fresh_session(job_id, status="failed", error=task.error)
     else:
         task.status = "rejected"
+        if job_id is not None:
+            finish_job_in_fresh_session(job_id, status="failed", error="用户拒绝")
     db.commit()
     db.refresh(approval)
     return ApprovalOut.model_validate(approval)

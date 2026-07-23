@@ -1,13 +1,21 @@
 import { useEffect, useState } from "react";
 import { useOutletContext, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Play, CheckCircle, XCircle, Clock, AlertTriangle } from "lucide-react";
+import { Play, CheckCircle, XCircle, Clock, AlertTriangle, Loader2, Bot } from "lucide-react";
 import { api, type Project } from "@/lib/api";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { Spinner } from "@/components/ui/Dialog";
 import { Textarea } from "@/components/ui/Input";
+import { EmptyState } from "@/components/ui/EmptyState";
+import { useAgentTaskStatus } from "@/lib/hooks/useAgentTaskStatus";
+import {
+  actionTypeLabel,
+  agentStatusLabel,
+  agentTaskLabel,
+  eventKindLabel,
+} from "@/lib/labels";
 
 const STATUS_META: Record<string, { color: string; icon: React.ComponentType<{ className?: string }> }> = {
   completed: { color: "bg-green-100 text-green-800", icon: CheckCircle },
@@ -21,9 +29,6 @@ const STATUS_META: Record<string, { color: string; icon: React.ComponentType<{ c
 export default function AgentPage() {
   const { project } = useOutletContext<{ project: Project }>();
   const qc = useQueryClient();
-  // Restore the selected task from the URL (`?task=`) so the global workflow
-  // sidebar can deep-link here and land on the in-progress task instead of a
-  // blank page. Syncs when the param changes (e.g. clicking another workflow).
   const [searchParams] = useSearchParams();
   const [selectedTask, setSelectedTask] = useState<string | null>(searchParams.get("task"));
   useEffect(() => {
@@ -35,42 +40,85 @@ export default function AgentPage() {
   const runTrend = useMutation({
     mutationFn: () =>
       api.runAgentTask(project.id, "research.trend_analysis", { user_request: request }),
-    onSuccess: (task) => setSelectedTask(task.id),
+    onSuccess: (task) => {
+      qc.invalidateQueries({ queryKey: ["workflows", "active"] });
+      if (task?.id) setSelectedTask(task.id);
+    },
   });
   const runHypo = useMutation({
     mutationFn: () =>
       api.runAgentTask(project.id, "research.generate_hypothesis", { user_request: request }),
-    onSuccess: (task) => { setSelectedTask(task.id); qc.invalidateQueries({ queryKey: ["ideas", project.id] }); },
+    onSuccess: (task) => {
+      qc.invalidateQueries({ queryKey: ["ideas", project.id] });
+      qc.invalidateQueries({ queryKey: ["workflows", "active"] });
+      if (task?.id) setSelectedTask(task.id);
+    },
   });
   const runCode = useMutation({
     mutationFn: () =>
       api.runAgentTask(project.id, "code.search_github", { user_request: request }),
-    onSuccess: (task) => { setSelectedTask(task.id); qc.invalidateQueries({ queryKey: ["repos", project.id] }); },
+    onSuccess: (task) => {
+      qc.invalidateQueries({ queryKey: ["repos", project.id] });
+      qc.invalidateQueries({ queryKey: ["workflows", "active"] });
+      if (task?.id) setSelectedTask(task.id);
+    },
   });
 
-  const busy = runTrend.isPending || runHypo.isPending || runCode.isPending;
+  const submissionBusy =
+    runTrend.isPending || runHypo.isPending || runCode.isPending;
+  const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
+  const activeTaskStatus = useAgentTaskStatus(
+    activeTaskId,
+    () => {
+      qc.invalidateQueries({ queryKey: ["ideas", project.id] });
+      qc.invalidateQueries({ queryKey: ["repos", project.id] });
+      setActiveTaskId(null);
+    },
+  );
+  const busy =
+    submissionBusy || activeTaskStatus.isActive || activeTaskStatus.isTerminal;
 
   return (
     <div className="p-8 max-w-5xl mx-auto space-y-5">
-      <h1 className="text-xl font-semibold tracking-tight">Agent 任务中心</h1>
+      <div>
+        <h1 className="text-xl font-semibold tracking-tight">研究助手</h1>
+        <p className="text-xs text-muted-foreground mt-1">
+          基于项目文献做趋势分析、生成研究想法，或检索相关代码仓库
+        </p>
+      </div>
 
       <Card className="p-4 space-y-3">
         <div className="text-sm text-muted-foreground">研究方向 / 分析请求</div>
-        {/* L6: use the shared Textarea component for consistent styling. */}
         <Textarea
           rows={2}
           value={request}
           onChange={(e) => setRequest(e.target.value)}
+          placeholder="描述你的研究方向或具体问题"
         />
         <div className="flex flex-wrap gap-2">
           <Button onClick={() => runTrend.mutate()} disabled={busy}>
-            <Play className="h-4 w-4" /> 研究趋势分析
+            {busy && activeTaskStatus.status === "pending" ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Play className="h-4 w-4" />
+            )}
+            研究趋势分析
           </Button>
           <Button onClick={() => runHypo.mutate()} disabled={busy}>
-            <Play className="h-4 w-4" /> 生成 idea
+            {busy && activeTaskStatus.status === "pending" ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Play className="h-4 w-4" />
+            )}
+            生成研究想法
           </Button>
           <Button onClick={() => runCode.mutate()} disabled={busy}>
-            <Play className="h-4 w-4" /> GitHub 代码检索
+            {busy && activeTaskStatus.status === "pending" ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Play className="h-4 w-4" />
+            )}
+            GitHub 代码检索
           </Button>
         </div>
         {(runTrend.isError || runHypo.isError || runCode.isError) && (
@@ -78,13 +126,21 @@ export default function AgentPage() {
             <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" />
             <div>
               {(runTrend.error || runHypo.error || runCode.error)?.message}
-              <div className="text-xs mt-1">Agent 需要 LLM。请在设置页配置模型 API。</div>
+              <div className="text-xs mt-1">智能生成需要先配置大模型。请到「设置」完成配置后重试。</div>
             </div>
           </div>
         )}
       </Card>
 
-      {selectedTask && <TaskDetail taskId={selectedTask} projectId={project.id} />}
+      {selectedTask ? (
+        <TaskDetail taskId={selectedTask} projectId={project.id} />
+      ) : (
+        <EmptyState
+          icon={<Bot className="h-10 w-10" />}
+          title="选择上方操作开始"
+          subtitle="任务进度也会出现在左侧「进行中的任务」，随时可点回来查看"
+        />
+      )}
     </div>
   );
 }
@@ -99,8 +155,6 @@ function TaskDetail({ taskId, projectId }: { taskId: string; projectId: string }
       return s && ["running", "pending"].includes(s) ? 1500 : false;
     },
   });
-  // H7: gate events/approvals polling on whether the task is still active.
-  // Previously these polled every 1.5s forever, even after the task finished.
   const isActive = !!task?.status && ["running", "pending", "awaiting_approval"].includes(task.status);
   const { data: events = [] } = useQuery({
     queryKey: ["agent-events", taskId],
@@ -126,16 +180,13 @@ function TaskDetail({ taskId, projectId }: { taskId: string; projectId: string }
   if (!task) return <Spinner />;
   const meta = STATUS_META[task.status] || STATUS_META.pending;
   const Icon = meta.icon;
-  // H11: JSON.parse on every render crashes the page (no ErrorBoundary
-  // caught it before; now wrapped but still better to parse defensively).
-  // Cast to a JSON-serializable shape so JSON.stringify accepts it.
   let result: Record<string, unknown> | null = null;
   if (task.result_json) {
     try {
       const parsed: unknown = JSON.parse(task.result_json);
       result = (typeof parsed === "object" && parsed !== null ? parsed : { _value: parsed }) as Record<string, unknown>;
     } catch {
-      result = { _raw: task.result_json, _error: "无法解析为 JSON" };
+      result = { _raw: task.result_json, _error: "无法解析结果" };
     }
   }
 
@@ -144,25 +195,24 @@ function TaskDetail({ taskId, projectId }: { taskId: string; projectId: string }
       <Card className="p-4">
         <div className="flex items-center gap-2">
           <Icon className="h-4 w-4" />
-          <span className="font-medium">{task.task_type}</span>
-          <Badge className={meta.color}>{task.status}</Badge>
-          <span className="text-xs text-muted-foreground ml-auto">{task.id}</span>
+          <span className="font-medium">{agentTaskLabel(task.task_type)}</span>
+          <Badge className={meta.color}>{agentStatusLabel(task.status)}</Badge>
         </div>
         {task.error && <div className="text-sm text-destructive mt-2">{task.error}</div>}
       </Card>
 
       {approvals.filter((a) => a.status === "pending").map((a) => (
         <Card key={a.id} className="p-4 border-amber-300 bg-amber-50 animate-fade-in">
-          <div className="flex items-center justify-between">
-            <div>
-              <div className="font-medium">需要审批:{a.action_type}</div>
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <div className="font-medium">需要你确认：{actionTypeLabel(a.action_type)}</div>
               {a.payload_json && (
                 <pre className="text-xs mt-1 bg-muted p-2 rounded max-h-40 overflow-auto">
                   {a.payload_json}
                 </pre>
               )}
             </div>
-            <div className="flex gap-2">
+            <div className="flex gap-2 shrink-0">
               <Button size="sm" onClick={() => decide.mutate(true)} disabled={decide.isPending}>批准</Button>
               <Button size="sm" variant="destructive" onClick={() => decide.mutate(false)} disabled={decide.isPending}>拒绝</Button>
             </div>
@@ -180,16 +230,16 @@ function TaskDetail({ taskId, projectId }: { taskId: string; projectId: string }
       )}
 
       <Card className="p-4">
-        <div className="font-medium mb-2">事件流</div>
-        <div className="space-y-1 max-h-64 overflow-auto text-xs font-mono">
+        <div className="font-medium mb-2">进度记录</div>
+        <div className="space-y-1 max-h-64 overflow-auto text-xs">
           {events.map((e) => (
             <div key={e.id} className="flex gap-2 animate-fade-in">
-              <span className="text-muted-foreground">{new Date(e.created_at).toLocaleTimeString()}</span>
-              <Badge className="bg-muted text-[10px]">{e.kind}</Badge>
+              <span className="text-muted-foreground shrink-0">{new Date(e.created_at).toLocaleTimeString()}</span>
+              <Badge className="bg-muted text-[10px] shrink-0 font-normal">{eventKindLabel(e.kind)}</Badge>
               <span className="break-all">{e.message}</span>
             </div>
           ))}
-          {events.length === 0 && <div className="text-muted-foreground">无事件</div>}
+          {events.length === 0 && <div className="text-muted-foreground">暂无记录</div>}
         </div>
       </Card>
     </div>

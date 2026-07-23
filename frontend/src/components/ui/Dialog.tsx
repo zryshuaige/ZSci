@@ -29,7 +29,7 @@ export function ConfirmDialog({
 }: ConfirmDialogProps) {
   if (!open) return null;
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm animate-fade-in">
+    <div className="fixed inset-0 z-modal flex items-center justify-center bg-black/40 backdrop-blur-sm animate-fade-in">
       <div className="w-full max-w-md rounded-lg bg-card p-5 shadow-float animate-pop">
         <h3 className="text-lg font-semibold">{title}</h3>
         {description && <div className="mt-2 text-sm text-muted-foreground">{description}</div>}

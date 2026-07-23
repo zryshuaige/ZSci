@@ -195,6 +195,7 @@ export interface ActiveWorkflowRun {
   run_id: string;
   experiment_id: string;
   project_id: string;
+  experiment_title: string | null;
   command: string | null;
   created_at: string;
 }
@@ -270,14 +271,36 @@ export interface Benchmark {
   experiment_id: string | null;
   name: string;
   kind: string; // "dataset" | "task" | "sota"
-  source: string; // "paperswithcode" | "hf"
+  source: string; // "paperswithcode" | "hf" | "manual"
   url: string | null;
   task_name: string | null;
   dataset_name: string | null;
   metric_name: string | null;
   metric_value: number | null;
   paper_id: string | null;
+  description: string | null;
+  tags: string[];
+  downloads: number | null;
+  is_mainstream: boolean;
+  author: string | null;
   created_at: string;
+}
+
+/** Ephemeral HF search hit — not yet added to the project library. */
+export interface BenchmarkHit {
+  name: string;
+  kind: string;
+  source: string;
+  url: string | null;
+  task_name: string | null;
+  dataset_name: string | null;
+  metric_name: string | null;
+  metric_value: number | null;
+  description: string | null;
+  tags: string[];
+  downloads: number | null;
+  is_mainstream: boolean;
+  author: string | null;
 }
 
 // --- Projects ---
@@ -364,7 +387,8 @@ export const api = {
     request<void>(`/annotations/${id}`, { method: "DELETE" }),
 
   // --- System ---
-  health: () => request<{ status: string; version: string; workspace: string }>("/health"),
+  health: () =>
+    request<{ status: string; version: string; workspace: string; db_ok?: boolean; db_error?: string | null }>("/health"),
   getSettings: () =>
     request<{ workspace_path: string; models: any; venues: string[] }>("/settings"),
 
@@ -428,10 +452,10 @@ export const api = {
   // --- Phase A: benchmarks (dataset/task/SOTA discovery) ---
   searchBenchmarks: (
     projectId: string,
-    body: { query: string; experiment_id?: string; limit?: number }
+    body: { query: string; limit?: number }
   ) =>
-    request<{ benchmarks: Benchmark[]; warnings: string[] }>(
-      `/projects/${projectId}/benchmarks`,
+    request<{ hits: BenchmarkHit[]; benchmarks?: BenchmarkHit[]; warnings: string[]; query_used?: string[] }>(
+      `/projects/${projectId}/benchmarks/search`,
       {
         method: "POST",
         body: JSON.stringify(body),
@@ -439,6 +463,29 @@ export const api = {
     ),
   listBenchmarks: (projectId: string) =>
     request<Benchmark[]>(`/projects/${projectId}/benchmarks`),
+  addBenchmark: (
+    projectId: string,
+    body: {
+      name: string;
+      kind?: string;
+      source?: string;
+      url?: string | null;
+      task_name?: string | null;
+      dataset_name?: string | null;
+      metric_name?: string | null;
+      metric_value?: number | null;
+      experiment_id?: string | null;
+      description?: string | null;
+      tags?: string[];
+      downloads?: number | null;
+      is_mainstream?: boolean;
+      author?: string | null;
+    }
+  ) =>
+    request<Benchmark>(`/projects/${projectId}/benchmarks/add`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
   createManualBenchmark: (
     projectId: string,
     body: {
@@ -450,10 +497,21 @@ export const api = {
       metric_name?: string | null;
       metric_value?: number | null;
       experiment_id?: string | null;
+      description?: string | null;
+      tags?: string[];
+      is_mainstream?: boolean;
     }
   ) =>
     request<Benchmark>(`/projects/${projectId}/benchmarks/manual`, {
       method: "POST",
+      body: JSON.stringify(body),
+    }),
+  updateBenchmark: (
+    benchmarkId: string,
+    body: { experiment_id?: string | null }
+  ) =>
+    request<Benchmark>(`/benchmarks/${benchmarkId}`, {
+      method: "PATCH",
       body: JSON.stringify(body),
     }),
   deleteBenchmark: (benchmarkId: string) =>

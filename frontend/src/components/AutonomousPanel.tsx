@@ -100,12 +100,14 @@ export default function AutonomousPanel({ taskId, onReset }: { taskId: string; o
             status === "failed" ? "bg-red-100 text-red-800" :
             "bg-blue-100 text-blue-800"
           }>
-            {done ? status : "进行中…"}
+            {done
+              ? (status === "completed" ? "已完成" : status === "failed" ? "失败" : status === "stopped" ? "已停止" : status)
+              : "进行中…"}
           </Badge>
         </div>
       </div>
       <div className="space-y-1 max-h-80 overflow-auto">
-        {events.length === 0 && <div className="text-xs text-muted-foreground">等待事件…</div>}
+        {events.length === 0 && <div className="text-xs text-muted-foreground">正在连接进度…</div>}
         {events.map((e, i) => (
           <div key={e.id || i} className="text-xs flex gap-2">
             <span className="text-muted-foreground shrink-0 w-16">{new Date(e.created_at).toLocaleTimeString()}</span>
@@ -196,9 +198,9 @@ export function AutonomousLauncher({
     <Card className="p-4 space-y-2">
       <div className="flex items-center justify-between">
         <div>
-          <div className="font-medium text-sm">自主实验 Agent</div>
+          <div className="font-medium text-sm">一键自主实验</div>
           <div className="text-xs text-muted-foreground">
-            一键自助:查 benchmark {">"} 生成代码 {">"} smoke 自修复 {">"} 跑实验 {">"} 汇总对比 SOTA
+            查找基准 → 生成代码 → 自检修复 → 运行 → 对比最优结果
           </div>
         </div>
         <Button onClick={() => launch.mutate()} disabled={launch.isPending}>
