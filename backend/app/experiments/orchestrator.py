@@ -85,11 +85,14 @@ HEARTBEAT_INTERVAL_SECONDS = 30
 
 
 def _sessions():
-    """Lazy sessionmaker accessor (mirrors the legacy orchestrator)."""
-    global SessionLocal
-    if SessionLocal is None:
-        SessionLocal = get_sessionmaker()
-    return SessionLocal
+    """Resolve a SessionLocal on demand.
+
+    Wraps ``get_sessionmaker()`` so callsites read naturally
+    (``with _sessions()() as db: ...``) and so this module remains
+    import-safe when no DB is configured (e.g. unit tests that stub the
+    orchestrator without touching the session factory).
+    """
+    return get_sessionmaker()
 
 
 # ---------------------------------------------------------------------------
@@ -184,12 +187,20 @@ def _set_overall_status(
     exp = db.get(Experiment, experiment_id)
     if exp is None:
         return
+    cur = exp.overall_status or "draft"
     try:
-        assert_exp_transition(exp.overall_status or "draft", status)
+        assert_exp_transition(cur, status)
     except Exception as exc:  # noqa: BLE001
-        # Don't crash the workflow on a stale transition; log and proceed.
-        logger.warning("overall_status transition %s -> %s rejected: %s", exp.overall_status, status, exc)
-        return
+        # An idempotent re-write of the *same* status is harmless - the
+        # orchestrator re-affirms "running" between phases, and the
+        # `decide_stage` endpoint also sets "running" synchronously on
+        # approve. We must NOT bail in that case, or the `current_stage`
+        # advance that rides along on the next call gets dropped and the
+        # stepper / hero keep pointing at the just-approved phase. Only
+        # bail on a genuinely illegal *change*.
+        if cur != status:
+            logger.warning("overall_status transition %s -> %s rejected: %s", cur, status, exc)
+            return
     exp.overall_status = status
     if current_stage is not None:
         exp.current_stage = current_stage

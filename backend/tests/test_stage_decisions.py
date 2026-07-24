@@ -337,6 +337,66 @@ def test_decide_approve_resolves_approval_and_appends_history(client, project):
     assert any(d.get("decision") == "approve" for d in stages["decision_history"])
 
 
+def test_decide_approve_transitions_stage_out_of_waiting(client, project):
+    """Regression: after POST /decide with "approve", the phase row MUST
+    leave `waiting_for_user` and the experiment MUST flip to `running` -
+    synchronously, in the same request.
+
+    The original `decide_stage` only flipped `approval.status` and left the
+    stage row + overall_status for the orchestrator to advance
+    asynchronously. But the orchestrator never re-marked an approved phase
+    (it falls through to the next phase), so the row stayed
+    `waiting_for_user` forever. The front-end's `variantFor` treats any
+    `waiting_for_user` stage as "show the 等待你的确认 hero", so the page
+    was stuck on "等待你的确认" even after the user clicked 确认.
+    """
+    from app.db.models import AgentTask, Approval, Experiment, ExperimentStage
+    from app.db.session import get_sessionmaker
+    from sqlalchemy import select
+
+    exp = _make_experiment(client, project)
+    with get_sessionmaker()() as db:
+        from app.experiments.stages import upsert_stage
+        upsert_stage(db, experiment_id=exp["id"], stage_key="phase_0_scope", status="waiting_for_user")
+        task = AgentTask(
+            id="task-decide-approve", project_id=project["id"],
+            task_type="experiment.autonomous_run", status="running",
+            input_json='{"experiment_id": "%s"}' % exp["id"],
+        )
+        db.add(task)
+        db.add(Approval(id="appr-approve", task_id=task.id,
+                        action_type="experiment.stage.phase_0_scope",
+                        payload_json='{"stage_key": "phase_0_scope"}', status="pending"))
+        e = db.get(Experiment, exp["id"])
+        e.current_stage = "phase_0_scope"
+        e.overall_status = "waiting_user"
+        db.commit()
+
+    resp = client.post(
+        f"/api/v1/experiments/{exp['id']}/decide",
+        json={"decision": "approve"},
+    )
+    assert resp.status_code == 200, resp.text
+
+    # The stage row is advanced out of waiting_for_user and overall flips
+    # to running - both visible to the very next GET /stages refetch.
+    with get_sessionmaker()() as db:
+        row = db.scalar(select(ExperimentStage).where(
+            ExperimentStage.experiment_id == exp["id"],
+            ExperimentStage.stage_key == "phase_0_scope",
+        ))
+        assert row.status == "completed", f"expected completed, got {row.status}"
+        e = db.get(Experiment, exp["id"])
+        assert e.overall_status == "running", f"expected running, got {e.overall_status}"
+
+    # And the /stages payload (what the front-end actually reads) agrees.
+    stages = _stages(client, exp["id"])
+    assert stages["overall_status"] == "running"
+    phase0 = next(s for s in stages["stages"] if s["stage_key"] == "phase_0_scope")
+    assert phase0["status"] == "completed"
+    assert not any(s["status"] == "waiting_for_user" for s in stages["stages"])
+
+
 def test_decide_abort_marks_phase_needs_revision(client, project):
     from app.db.models import AgentTask, Approval, Experiment, ExperimentStage
     from app.db.session import get_sessionmaker

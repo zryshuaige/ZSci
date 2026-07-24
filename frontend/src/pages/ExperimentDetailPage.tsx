@@ -79,6 +79,16 @@ export default function ExperimentDetailPage() {
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [rqDraft, setRqDraft] = useState<string>("");
 
+  // True while a /decide request is in flight. We set it synchronously in
+  // decideMutation.onMutate (before the first await) so the stageProgress
+  // query's refetchInterval sees it on the immediate re-render and returns
+  // false -> TanStack clears the already-scheduled 2s refetch timer.
+  // Without this, that timer can fire mid-round-trip and overwrite the
+  // optimistic update with the server's stale `waiting_user` payload
+  // (the orchestrator hasn't woken up yet), snapping the hero back to
+  // "等待你的确认" for a moment. See decideMutation below.
+  const decidePendingRef = useRef(false);
+
   const view = usePhaseView();
 
   // Gate queries on expId so we don't request /experiments/undefined.
@@ -104,6 +114,9 @@ export default function ExperimentDetailPage() {
     queryFn: () => api.listStages(expId!),
     enabled: !!expId,
     refetchInterval: (q) => {
+      // Hold off the periodic refetch while a /decide is in flight so we
+      // don't clobber the optimistic update with stale server data.
+      if (decidePendingRef.current) return false;
       const d = q.state.data;
       if (!d) return 4000;
       const active = d.stages.some(
@@ -162,19 +175,29 @@ export default function ExperimentDetailPage() {
    *
    * The original implementation only invalidated the cache after the
    * server returned, which left the user staring at "等待决策" for
-   * several seconds after they clicked 确认. The new flow:
+   * several seconds after they clicked 确认. Worse, it only patched
+   * `stage.status`, while the page-level topbar badge reads
+   * `stageProgress.overall_status` — so the badge still said "等待决策"
+   * even when the underlying stage flipped to "approved". The new flow:
    *
    *   1. `onMutate` — cancel any in-flight refetch, snapshot the
-   *      current stage cache, write the optimistic next state.
+   *      current stage cache, write BOTH the stage status AND the
+   *      experiment-level overall_status so every UI surface that
+   *      reads from either one switches immediately.
    *   2. server call — POST /decide.
    *   3. `onError` — restore the snapshot so the UI snaps back.
    *   4. `onSettled` — invalidate so the canonical server data wins.
    *
-   * The optimistic mapping:
-   *   - approve → stage.status = "approved"
-   *   - edit    → stage.status = "needs_revision"
-   *   - skip    → stage.status = "skipped"
-   *   - abort   → stage.status = "needs_revision"
+   * The optimistic mapping (mirrors `backend/app/routers/experiments.py`
+   * `decide_stage` — it DOES transition the stage row + `overall_status`
+   * synchronously in the same POST (not just `approval.status`), so the
+   * refetch fired by `onSettled` returns the same state we paint
+   * optimistically - no flicker. We mirror that transition locally so
+   * the UI flips instantly the moment the user clicks):
+   *   - approve → overall_status="running", stage.status="completed"
+   *   - skip    → overall_status="running", stage.status="skipped"
+   *   - edit    → overall_status="running", stage.status="completed"
+   *   - abort   → overall_status="paused",  stage.status="needs_revision"
    */
   const decideMutation = useMutation({
     mutationFn: (vars: {
@@ -183,29 +206,49 @@ export default function ExperimentDetailPage() {
       target_stage_id?: string | null;
     }) => api.decideStage(expId!, vars),
     onMutate: async (vars) => {
+      // Set synchronously BEFORE any await so the refetchInterval pause
+      // takes effect on the immediate re-render (see decidePendingRef).
+      decidePendingRef.current = true;
       await qc.cancelQueries({ queryKey: ["experiment-stages", expId] });
-      const prev = qc.getQueryData<StageProgressData>(["experiment-stages", expId]);
-      if (prev) {
-        const optimisticStatus =
-          vars.decision === "approve"
-            ? "approved"
-            : vars.decision === "skip"
-              ? "skipped"
-              : "needs_revision";
+      await qc.cancelQueries({ queryKey: ["experiment", expId] });
+      const prevStages = qc.getQueryData<StageProgressData>(["experiment-stages", expId]);
+      const prevExp = qc.getQueryData<typeof exp>(["experiment", expId]);
+      const isAbort = vars.decision === "abort";
+      const optimisticStageStatus: string =
+        vars.decision === "approve" || vars.decision === "edit"
+          ? "completed"
+          : vars.decision === "skip"
+            ? "skipped"
+            : "needs_revision";
+      const optimisticOverall: string = isAbort ? "paused" : "running";
+      if (prevStages) {
         qc.setQueryData<StageProgressData>(["experiment-stages", expId], {
-          ...prev,
-          stages: prev.stages.map((s) =>
-            s.status === "waiting_for_user" ? { ...s, status: optimisticStatus } : s,
+          ...prevStages,
+          // The topbar badge + the hero variant both read overall_status.
+          overall_status: optimisticOverall,
+          stages: prevStages.stages.map((s) =>
+            s.status === "waiting_for_user" ? { ...s, status: optimisticStageStatus } : s,
           ),
         });
       }
-      return { prev };
+      if (prevExp) {
+        // Exp fallback (`stageProgress?.overall_status ?? exp.overall_status`)
+        // is read from this cache — patch it too so refresh during the
+        // round-trip doesn't blink back to "waiting_user".
+        qc.setQueryData<typeof exp>(["experiment", expId], {
+          ...prevExp,
+          overall_status: optimisticOverall,
+        });
+      }
+      return { prev: prevStages, prevExp };
     },
     onError: (err, _vars, ctx) => {
       if (ctx?.prev) qc.setQueryData(["experiment-stages", expId], ctx.prev);
+      if (ctx?.prevExp) qc.setQueryData(["experiment", expId], ctx.prevExp);
       showFriendlyError(err);
     },
     onSettled: () => {
+      decidePendingRef.current = false;
       qc.invalidateQueries({ queryKey: ["experiment-stages", expId] });
       qc.invalidateQueries({ queryKey: ["experiment", expId] });
     },
@@ -263,8 +306,13 @@ export default function ExperimentDetailPage() {
 
   return (
     <div className="flex min-h-[calc(100vh-3.5rem)] flex-col pb-20">
-      {/* Sticky top: title + status */}
-      <header className="sticky top-14 z-20 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80">
+      {/* Page-level header sits BELOW ProjectLayout's sticky project+tab bar
+          (which provides the project name and section tabs). Rendering
+          another sticky bar here used to create a 56px phantom gap because
+          ProjectLayout's actual header height varies with its content.
+          Keeping this in normal flow lets the page visually hug the
+          project bar above. */}
+      <header className="border-b bg-background">
         <div className="mx-auto max-w-5xl px-4 py-3 md:px-6">
           <div className="flex items-center justify-between gap-3 flex-wrap">
             <div className="min-w-0">

@@ -142,6 +142,61 @@ def test_orchestrator_dispatch_table_exposes_pause_resume_helpers():
     stop_experiment("nonexistent_task")
 
 
+def test_set_overall_status_idempotent_write_still_advances_current_stage():
+    """Regression: `_set_overall_status` must NOT bail when asked to write the
+    SAME status it already holds - the orchestrator re-affirms "running"
+    between phases and rides a `current_stage` advance on those calls. The
+    `decide_stage` endpoint also sets overall_status="running" synchronously
+    on approve, so the orchestrator's next `_set_overall_status("running",
+    current_stage=next_phase)` is a same-status write. If that bails,
+    `current_stage` never advances and the stepper/hero keep pointing at the
+    just-approved phase. Only a genuinely illegal *change* should bail."""
+    import tempfile
+    from pathlib import Path
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from app.db.base import Base
+    import app.db.models  # noqa: F401
+    from app.db.models import Experiment
+    from app.experiments.orchestrator import _set_overall_status
+
+    tmp = Path(tempfile.mkdtemp())
+    engine = create_engine(f"sqlite:///{tmp / 't.db'}", future=True)
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+    db = Session()
+    try:
+        exp = Experiment(id="exp-oidem", project_id="proj1", title="t", slug="s",
+                         status="scaffolded", mode="interactive",
+                         overall_status="running", current_stage="phase_0_scope")
+        db.add(exp)
+        db.commit()
+
+        # Same-status write ("running" -> "running") with a new current_stage.
+        # Before the fix this early-returned and left current_stage untouched.
+        _set_overall_status(db, "exp-oidem", "running", current_stage="phase_1_plan")
+        db.commit()
+        db.refresh(exp)
+        assert exp.overall_status == "running"
+        assert exp.current_stage == "phase_1_plan", (
+            f"idempotent write dropped current_stage advance: {exp.current_stage}"
+        )
+
+        # A genuinely illegal *change* still bails (no crash, no write).
+        # "running" -> "draft" is not in EXP_TRANSITIONS (running can only
+        # go to paused/waiting_user/completed/failed/archived).
+        _set_overall_status(db, "exp-oidem", "draft", current_stage="phase_2_build")
+        db.commit()
+        db.refresh(exp)
+        assert exp.overall_status == "running", "illegal change should not have written"
+        assert exp.current_stage == "phase_1_plan", "illegal change should not advance stage"
+    finally:
+        db.close()
+        Base.metadata.drop_all(engine)
+        engine.dispose()
+
+
 def test_get_stages_for_legacy_experiment_synthesizes_five_not_started_cells(client, project):
     """A brand-new experiment has no experiment_stages rows; GET /stages
     should still return 5 cells in `not_started` status (NOT 9 archived —

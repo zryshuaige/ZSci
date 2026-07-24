@@ -722,26 +722,44 @@ def decide_stage(
     approval.decision_at = datetime.now(UTC)
 
     # Apply per-decision side effects (only the 4 surfaced in the UI).
-    if decision == "skip":
-        stage_row = db.scalar(
-            select(ExperimentStage).where(
-                ExperimentStage.experiment_id == exp_id,
-                ExperimentStage.stage_key == target_stage_key,
-            )
+    #
+    # Iteration 4 fix: we transition the stage row + overall_status HERE,
+    # synchronously, before waking the orchestrator. Previously only
+    # `approval.status` flipped and the orchestrator was left to advance
+    # the stage asynchronously - but for `approve` the orchestrator never
+    # re-marked the current stage at all (it falls through to the next
+    # phase), so the row stayed `waiting_for_user` forever and
+    # `GET /stages` kept returning it. The front-end's `variantFor` treats
+    # any `waiting_for_user` stage as "show the 等待你的确认 hero", so the
+    # page was stuck on "等待你的确认" even after the user clicked 确认.
+    # Advancing the state here means the very next `listStages` refetch
+    # (including the one triggered by the front-end's optimistic update)
+    # sees the post-decision state instead of stale `waiting_for_user`.
+    stage_row = db.scalar(
+        select(ExperimentStage).where(
+            ExperimentStage.experiment_id == exp_id,
+            ExperimentStage.stage_key == target_stage_key,
         )
+    )
+    if decision == "skip":
         if stage_row is not None:
             stage_row.status = "skipped"
             mark_downstream_outdated(db, exp_id, target_stage_key, invalidated_by_stage_id=stage_row.id)
+        exp.overall_status = "running"
     elif decision == "abort":
-        stage_row = db.scalar(
-            select(ExperimentStage).where(
-                ExperimentStage.experiment_id == exp_id,
-                ExperimentStage.stage_key == target_stage_key,
-            )
-        )
         if stage_row is not None:
             stage_row.status = "needs_revision"
         exp.overall_status = "paused"
+    else:
+        # approve / edit: the phase already ran successfully before the
+        # checkpoint (the orchestrator marked it `completed`, then the
+        # checkpoint overwrote it to `waiting_for_user`). Confirming the
+        # decision restores `completed`. For `edit` the orchestrator
+        # overwrites outputs_json with the user's edited payload right
+        # after it wakes; the status stays `completed`.
+        if stage_row is not None:
+            stage_row.status = "completed"
+        exp.overall_status = "running"
 
     # Append to the experiment's decision history trail (with explicit Z so
     # the front-end parses in the user's local timezone).
