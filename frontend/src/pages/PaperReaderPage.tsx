@@ -10,6 +10,7 @@ import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { Spinner } from "@/components/ui/Dialog";
 import { cn } from "@/lib/cn";
+import { showFriendlyError } from "@/lib/useFriendlyError";
 
 type Tab = "translate" | "note" | "metadata";
 
@@ -77,11 +78,13 @@ export default function PaperReaderPage() {
   const parseMutation = useMutation({
     mutationFn: () => api.parsePaper(paperId!),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["paper", paperId] }),
+    onError: (err) => showFriendlyError(err),
   });
 
   const genNoteMutation = useMutation({
     mutationFn: () => api.generateReadingNote(paperId!),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["reading-note", paperId] }),
+    onError: (err) => showFriendlyError(err),
   });
 
   const saveNoteMutation = useMutation({
@@ -111,12 +114,6 @@ export default function PaperReaderPage() {
         >
           {parseMutation.isPending ? "解析中…" : "重新解析"}
         </Button>
-        {/* M9: surface parse errors instead of silently reverting the label. */}
-        {parseMutation.isError && (
-          <span className="text-xs text-destructive ml-2">
-            解析失败:{(parseMutation.error as Error).message}
-          </span>
-        )}
       </div>
 
       <div className="flex flex-1 min-h-0">
@@ -192,11 +189,6 @@ export default function PaperReaderPage() {
                   >
                     {genNoteMutation.isPending ? "生成中…" : "生成阅读笔记"}
                   </Button>
-                  {genNoteMutation.isError && (
-                    <span className="text-xs text-destructive">
-                      {(genNoteMutation.error as Error).message}
-                    </span>
-                  )}
                 </div>
                 {paper.parse_status !== "success" && (
                   <p className="text-xs text-muted-foreground">

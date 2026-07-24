@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useOutletContext, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Play, CheckCircle, XCircle, Clock, AlertTriangle, Loader2, Bot } from "lucide-react";
-import { api, type Project } from "@/lib/api";
+import { api, fmtTime, type Project } from "@/lib/api";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
@@ -234,7 +234,7 @@ function TaskDetail({ taskId, projectId }: { taskId: string; projectId: string }
         <div className="space-y-1 max-h-64 overflow-auto text-xs">
           {events.map((e) => (
             <div key={e.id} className="flex gap-2 animate-fade-in">
-              <span className="text-muted-foreground shrink-0">{new Date(e.created_at).toLocaleTimeString()}</span>
+              <span className="text-muted-foreground shrink-0">{fmtTime(e.created_at)}</span>
               <Badge className="bg-muted text-[10px] shrink-0 font-normal">{eventKindLabel(e.kind)}</Badge>
               <span className="break-all">{e.message}</span>
             </div>

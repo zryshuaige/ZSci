@@ -10,6 +10,7 @@ import { Input, Textarea } from "@/components/ui/Input";
 import { Badge } from "@/components/ui/Badge";
 import { Spinner, ConfirmDialog } from "@/components/ui/Dialog";
 import { Tooltip } from "@/components/ui/Tooltip";
+import { showFriendlyError } from "@/lib/useFriendlyError";
 
 export default function BenchmarksPanel({
   projectId,
@@ -50,9 +51,10 @@ export default function BenchmarksPanel({
       setWarnings(r.warnings || []);
       setQueryUsed(r.query_used || []);
     },
-    onError: () => {
+    onError: (err) => {
       setHits([]);
       setWarnings([]);
+      showFriendlyError(err);
     },
   });
 
@@ -118,12 +120,6 @@ export default function BenchmarksPanel({
           </Button>
         </div>
       </div>
-
-      {searchMutation.isError && (
-        <div className="text-xs text-destructive shrink-0">
-          搜索失败：{(searchMutation.error as Error).message}
-        </div>
-      )}
 
       {warnings.length > 0 && (
         <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-md p-2 flex gap-2 shrink-0">
@@ -512,6 +508,7 @@ function ManualBenchmarkDialog({
       setExperimentId("");
       onSaved();
     },
+    onError: (err) => showFriendlyError(err),
   });
 
   if (!open) return null;
@@ -575,9 +572,6 @@ function ManualBenchmarkDialog({
             标记为业界主流基准
           </label>
         </div>
-        {create.isError && (
-          <div className="text-xs text-destructive mt-3">添加失败：{(create.error as Error).message}</div>
-        )}
         <div className="flex justify-end gap-2 pt-4 mt-4 border-t border-border">
           <Button variant="outline" onClick={onClose} disabled={create.isPending}>取消</Button>
           <Button onClick={() => create.mutate()} disabled={!name.trim() || create.isPending}>

@@ -27,7 +27,7 @@ def test_get_experiment_404(client):
 def test_create_run_requires_confirmed(client, project):
     exp = client.post(
         f"/api/v1/projects/{project['id']}/experiments",
-        json={"title": "Confirm Gate"},
+        json={"title": "Confirm Gate", "research_question": "does X work?"},
     ).json()
     resp = client.post(
         f"/api/v1/experiments/{exp['id']}/runs",
@@ -42,7 +42,7 @@ def test_create_run_executes_simple_command(client, project):
     """
     exp = client.post(
         f"/api/v1/projects/{project['id']}/experiments",
-        json={"title": "Echo Run"},
+        json={"title": "Echo Run", "research_question": "does X work?"},
     ).json()
     resp = client.post(
         f"/api/v1/experiments/{exp['id']}/runs",
@@ -61,7 +61,7 @@ def test_get_run_logs_returns_text(client, project):
     """After a run, /logs returns the captured stdout."""
     exp = client.post(
         f"/api/v1/projects/{project['id']}/experiments",
-        json={"title": "Logs Test"},
+        json={"title": "Logs Test", "research_question": "does X work?"},
     ).json()
     run_resp = client.post(
         f"/api/v1/experiments/{exp['id']}/runs",
@@ -82,7 +82,7 @@ def test_get_run_logs_404_for_unknown_run(client):
 def test_list_runs(client, project):
     exp = client.post(
         f"/api/v1/projects/{project['id']}/experiments",
-        json={"title": "List Runs"},
+        json={"title": "List Runs", "research_question": "does X work?"},
     ).json()
     client.post(
         f"/api/v1/experiments/{exp['id']}/runs",
@@ -103,7 +103,7 @@ def test_stop_run_after_completion_is_safe(client, project):
     stopped=False because no live process owns the run."""
     exp = client.post(
         f"/api/v1/projects/{project['id']}/experiments",
-        json={"title": "Stop After Done"},
+        json={"title": "Stop After Done", "research_question": "does X work?"},
     ).json()
     run = client.post(
         f"/api/v1/experiments/{exp['id']}/runs",
@@ -118,7 +118,7 @@ def test_get_metrics_for_run_without_metrics(client, project):
     """A run with no METRIC lines returns an empty metrics list, not an error."""
     exp = client.post(
         f"/api/v1/projects/{project['id']}/experiments",
-        json={"title": "No Metrics"},
+        json={"title": "No Metrics", "research_question": "does X work?"},
     ).json()
     run = client.post(
         f"/api/v1/experiments/{exp['id']}/runs",
@@ -137,7 +137,7 @@ def test_subprocess_env_does_not_inherit_api_keys(client, project, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-LEAK-VALUE-DO-NOT-EXFIL-12345")
     exp = client.post(
         f"/api/v1/projects/{project['id']}/experiments",
-        json={"title": "Env Leak Test"},
+        json={"title": "Env Leak Test", "research_question": "does X work?"},
     ).json()
     run = client.post(
         f"/api/v1/experiments/{exp['id']}/runs",
@@ -154,7 +154,7 @@ def test_list_experiment_files_and_read(client, project):
     """Phase D: the code browser lists source files (skipping runs/) and reads one."""
     exp = client.post(
         f"/api/v1/projects/{project['id']}/experiments",
-        json={"title": "Code Browser"},
+        json={"title": "Code Browser", "research_question": "does X work?"},
     ).json()
     files = client.get(f"/api/v1/experiments/{exp['id']}/files").json()["files"]
     # scaffold writes src/train.py + configs/base.yaml etc.
@@ -171,7 +171,7 @@ def test_get_experiment_file_rejects_traversal(client, project):
     """The code browser must not escape the experiment dir via .. """
     exp = client.post(
         f"/api/v1/projects/{project['id']}/experiments",
-        json={"title": "Traversal"},
+        json={"title": "Traversal", "research_question": "does X work?"},
     ).json()
     # ../../<anything> resolves outside the exp dir -> 403.
     resp = client.get(f"/api/v1/experiments/{exp['id']}/file?path=../../etc/passwd")

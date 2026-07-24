@@ -53,18 +53,14 @@ files 里 path 相对实验根目录,只含字母数字/_-.,不得含 .. 或绝�
 
 
 def _safe_json_load(text: str) -> dict | None:
-    """Extract the first JSON object from an LLM response (tolerates fences)."""
-    fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-    if fence:
-        text = fence.group(1)
-    m = re.search(r"\{.*\}", text, re.DOTALL)
-    if not m:
-        return None
-    try:
-        v = json.loads(m.group(0))
-        return v if isinstance(v, dict) else None
-    except ValueError:
-        return None
+    """Extract the first JSON object from an LLM response.
+
+    Delegates to :func:`app.llm.json_utils.extract_json_object` (tolerates
+    fences, prose, truncation).
+    """
+    from app.llm.json_utils import extract_json_object
+
+    return extract_json_object(text)
 
 
 def _build_context(

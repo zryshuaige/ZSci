@@ -2,8 +2,10 @@ import { useState, useRef, useEffect } from "react";
 import { createPortal } from "react-dom";
 import { useOutletContext } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useNavigate } from "react-router-dom";
 import { Lightbulb, Trash2, Sparkles, Plus, Pencil, ChevronDown, Loader2 } from "lucide-react";
 import { api, type Idea, type Project } from "@/lib/api";
+import { showFriendlyError } from "@/lib/useFriendlyError";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { Input, Textarea } from "@/components/ui/Input";
@@ -17,8 +19,8 @@ import { useAgentTaskStatus } from "@/lib/hooks/useAgentTaskStatus";
 const STATUS_LABEL: Record<string, string> = {
   backlog: "待评估",
   hypothesis: "待验证",
-  decision: "已采纳",
-  rejected: "已否决",
+  decision: "已纳入研究方向",
+  rejected: "已搁置",
 };
 const STATUS_COLORS: Record<string, string> = {
   backlog: "bg-muted",
@@ -31,6 +33,7 @@ const STATUS_ORDER: (keyof typeof STATUS_LABEL)[] = ["backlog", "hypothesis", "d
 export default function IdeasPage() {
   const { project } = useOutletContext<{ project: Project }>();
   const qc = useQueryClient();
+  const navigate = useNavigate();
   const [creating, setCreating] = useState(false);
   const [title, setTitle] = useState("");
   const [hyp, setHyp] = useState("");
@@ -49,6 +52,7 @@ export default function IdeasPage() {
   const createMutation = useMutation({
     mutationFn: () =>
       api.createIdea(project.id, { title, hypothesis: hyp, motivation: motiv, status: "backlog" }),
+    onError: (err) => showFriendlyError(err),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["ideas", project.id] });
       setCreating(false); setTitle(""); setHyp(""); setMotiv("");
@@ -57,6 +61,7 @@ export default function IdeasPage() {
 
   const delMutation = useMutation({
     mutationFn: (id: string) => api.deleteIdea(id),
+    onError: (err) => showFriendlyError(err),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["ideas", project.id] });
       setDeletingIdea(null);
@@ -66,12 +71,26 @@ export default function IdeasPage() {
   const updateMutation = useMutation({
     mutationFn: (args: { id: string; body: Partial<{ title: string; hypothesis: string; motivation: string; status: string }> }) =>
       api.updateIdea(args.id, args.body),
+    onError: (err) => showFriendlyError(err),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["ideas", project.id] }),
   });
 
+  // Phase B entrypoint: 「基于已有研究生成候选」不再直接入库,而是跳到候选对比
+  // 屏让用户先看 / 选 / 采纳。`user_request` 走 project.research_direction;
+  // 空时退化为让用户在 ExploreNewPage 自己写。
+  const goGenerate = () => {
+    const seed = (project.research_direction || "").trim();
+    if (!seed) {
+      navigate(`/explore/${project.id}/new`);
+      return;
+    }
+    const params = new URLSearchParams({ idea: seed });
+    navigate(`/explore/${project.id}/ideas?${params.toString()}`);
+  };
   const genMutation = useMutation({
     mutationFn: () =>
       api.runAgentTask(project.id, "research.generate_hypothesis", { user_request: project.research_direction || "" }),
+    onError: (err) => showFriendlyError(err),
     onSuccess: (task) => {
       // The backend synchronously ran the skill and returned the terminal
       // task. Refresh the affected lists and the global sidebar so the
@@ -104,40 +123,33 @@ export default function IdeasPage() {
     <div className="p-8 max-w-5xl mx-auto space-y-5">
       <div className="relative z-chrome flex items-center justify-between gap-4">
         <div className="min-w-0">
-          <h1 className="text-xl font-semibold tracking-tight">研究想法</h1>
+          <h1 className="text-xl font-semibold tracking-tight">研究方向汇总</h1>
           <p className="text-xs text-muted-foreground mt-1">
-            基于已下载论文生成可验证的研究假设,或手动记录自己的想法
+            这里汇总本项目已记录的研究方向,可手动整理,或基于已下载文献挑选进一步评估的候选。
           </p>
         </div>
         <div className="flex gap-2 shrink-0">
           <Button variant="outline" onClick={() => setCreating(true)}>
-            <Plus className="h-4 w-4" /> 手动添加
+            <Plus className="h-4 w-4" /> 手动记录
           </Button>
           <Button
-            onClick={() => genMutation.mutate()}
+            onClick={goGenerate}
             disabled={isGenRunning}
-            title="基于项目已下载论文生成可验证的研究假设"
+            title="基于项目已下载文献,挑选若干值得进一步评估的研究方向"
           >
             {isGenRunning ? (
               <Loader2 className="h-4 w-4 animate-spin" />
             ) : (
               <Sparkles className="h-4 w-4" />
             )}
-            {isGenRunning ? "生成中…" : "智能生成想法"}
+            {isGenRunning ? "整理中…" : "基于已有研究生成候选"}
           </Button>
         </div>
       </div>
 
-      {genMutation.isError && (
-        <Card className="p-3 text-sm text-destructive animate-pop">
-          生成失败：{(genMutation.error as Error).message}
-          <div className="text-xs mt-1 opacity-80">智能生成需要先配置大模型。请到「设置」完成配置后重试。</div>
-        </Card>
-      )}
-
       {genTaskStatus.isTerminal && genTaskStatus.status === "failed" && (
         <Card className="p-3 text-sm text-destructive animate-pop">
-          生成任务失败{genTaskStatus.lastMessage ? `：${genTaskStatus.lastMessage}` : ""}
+          整理任务失败{genTaskStatus.lastMessage ? `:${genTaskStatus.lastMessage}` : ""}
           <div className="text-xs mt-1 opacity-80">可在左侧「进行中的任务」查看详情。</div>
         </Card>
       )}

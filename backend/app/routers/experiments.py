@@ -5,13 +5,13 @@ import asyncio
 import json
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.db.models import AgentTask, Benchmark, Experiment, ExperimentRun, Project, RunMetric
+from app.db.models import AgentTask, Benchmark, Experiment, ExperimentRun, Idea, Project, RunMetric
 from app.db.session import get_db
 from app.experiments.benchmarks import (
     create_manual_benchmark,
@@ -22,7 +22,10 @@ from app.experiments.benchmarks import (
     store_benchmark_hit,
 )
 from app.experiments.codegen import generate_experiment_code
-from app.experiments.orchestrator import run_autonomous_experiment
+from app.experiments.orchestrator import (
+    run_autonomous_experiment,
+    run_autonomous_experiment_v2,
+)
 from app.experiments.runner import run_experiment, stop_run, tail_log
 from app.experiments.scaffold import scaffold_experiment
 from app.llm.gateway import ModelNotConfigured
@@ -34,15 +37,28 @@ from app.schemas import (
     BenchmarkSearchRequest,
     BenchmarkSearchResponse,
     BenchmarkUpdate,
+    BranchOut,
     CodegenRequest,
     CodegenResponse,
     ExperimentCreate,
     ExperimentOut,
+    ExperimentStageDecision,
+    ExperimentStageDecisionOut,
+    ExperimentStageOut,
+    ExperimentUpdate,
+    ForkRequest,
     MetricOut,
+    NextStepOut,
+    NextStepsOut,
+    PhaseViewItem,
+    PhaseViewOut,
+    PlanPreviewMetricOut,
+    PlanPreviewOut,
     RunCreate,
     RunOut,
+    StageProgressOut,
 )
-from app.utils import new_id, slugify
+from app.utils import iso_utc, new_id, slugify
 from app.workspace.manager import WorkspaceManager, audit
 from app.workspace.sandbox import assert_within_project, project_dir
 
@@ -57,6 +73,9 @@ def _to_out(e: Experiment) -> ExperimentOut:
         related_idea_id=e.related_idea_id, status=e.status,
         research_question=e.research_question, hypothesis=e.hypothesis,
         plan_json=e.plan_json, created_at=e.created_at, updated_at=e.updated_at,
+        mode=e.mode, overall_status=e.overall_status, current_stage=e.current_stage,
+        parent_experiment_id=e.parent_experiment_id, branch_name=e.branch_name,
+        decision_history_json=e.decision_history_json,
     )
 
 
@@ -67,6 +86,84 @@ def create_experiment(
     project = db.get(Project, project_id)
     if project is None:
         raise HTTPException(404, "Project not found")
+    # Iteration 4 — three-tier fallback for research_question:
+    #   1. Explicit non-empty caller-provided RQ (used as-is, even
+    #      when an Idea is also present).
+    #   2. Blank RQ (caller omitted OR sent "") + valid related_idea_id
+    #      with `hypothesis` → inherit that as the RQ.
+    #   3. Blank RQ + Idea with blank `hypothesis` but non-blank
+    #      `motivation` → inherit `motivation`. (Previously the M30
+    #      inheritance was a one-shot lookup of `idea.hypothesis` only,
+    #      which silently produced empty-RQ experiments when a candidate
+    #      had motivation but no hypothesis.)
+    #   4. Blank RQ + Idea with blank `hypothesis` + blank `motivation`
+    #      + non-blank `title` → inherit the title.
+    #   5. Blank RQ + no valid Idea (or all-blank Idea) → if the caller
+    #      omitted the field entirely, 422 with the friendly Chinese
+    #      message. If the caller sent an explicit empty string, the
+    #      round-trip preserves "" verbatim so the existing
+    #      "create empty → PATCH later" workflow keeps working
+    #      (see test_stage_decisions.py::_make_experiment).
+    #
+    # Hypothesis follows the same chain (omitted → motivation →
+    # hypothesis → title) but only triggers on **omitted** (M30
+    # semantics): an explicit "" or "X" round-trips literally so
+    # the "create empty → PATCH later" workflow + PATCH tests keep
+    # working.
+    rq: str | None = payload.research_question
+    hyp: str | None = payload.hypothesis
+    rq_inherited = "research_question" not in payload.model_fields_set
+    hyp_inherited = "hypothesis" not in payload.model_fields_set
+    idea: Idea | None = None
+    if payload.related_idea_id:
+        idea = db.get(Idea, payload.related_idea_id)
+        # M30 semantics: only inherit from ideas that belong to the
+        # same project; cross-project idea → no inheritance (treated
+        # the same as no idea at all for this lookup).
+        if idea is not None and idea.project_id != project_id:
+            idea = None
+    # 3-tier fall-back triggers whenever the RQ is blank (omitted OR
+    # explicit "") AND a usable Idea exists with at least one
+    # non-blank text field. This matches the plan's "若空且有
+    # related_idea_id" wording and prevents the ExploreIdeasPage
+    # "adopt blank candidate" flow from producing empty-RQ
+    # experiments when a candidate's hypothesis happens to be blank.
+    # The fall-back mutates `rq` only when there's actually something
+    # to grab — caller-provided `""` is preserved when the Idea has
+    # nothing usable, so the "create empty → PATCH later" workflow
+    # still works.
+    rq_is_blank = not (rq or "").strip()
+    if rq_is_blank and idea is not None:
+        recovered = idea.hypothesis or idea.motivation or idea.title
+        if recovered and recovered.strip():
+            rq = recovered
+    if hyp_inherited and idea is not None:
+        recovered_hyp = idea.motivation or idea.hypothesis or idea.title
+        if recovered_hyp and recovered_hyp.strip():
+            hyp = recovered_hyp
+    # Normalise blank values to None when the value came from
+    # inheritance (Idea fields might be None/blank). Caller-provided
+    # explicit "" round-trips literally so PATCH /experiments/{id}
+    # tests + the front-end see the same shape back.
+    rq_norm: str | None = (
+        (rq or "").strip() or None if rq_inherited else rq
+    )
+    hyp_norm: str | None = (
+        (hyp or "").strip() or None if hyp_inherited else hyp
+    )
+
+    # Final guard: 422 only fires when the caller OMITTED the field
+    # entirely AND no Idea fallback could supply text. Explicit empty
+    # strings (the "create empty → PATCH later" workflow) bypass the
+    # 422 by design — see test_stage_decisions.py::_make_experiment.
+    if rq_inherited and not (rq_norm and rq_norm.strip()):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "请先描述要研究的问题,再创建实验。"
+                "你可以在表单里直接填写,或先选择一个研究想法。"
+            ),
+        )
     exp_slug = slugify(payload.title)
     # ensure uniqueness
     existing = db.scalar(select(Experiment).where(Experiment.project_id == project_id, Experiment.slug == exp_slug))
@@ -85,8 +182,8 @@ def create_experiment(
         source_repository_id=payload.source_repository_id,
         related_idea_id=payload.related_idea_id,
         status="scaffolded",
-        research_question=payload.research_question,
-        hypothesis=payload.hypothesis,
+        research_question=rq_norm,
+        hypothesis=hyp_norm,
     )
     db.add(exp)
     audit(db, action_type="experiment.scaffold", project_id=project_id, target=str(root),
@@ -102,6 +199,52 @@ def list_experiments(project_id: str, db: Session = Depends(get_db)) -> list[Exp
         select(Experiment).where(Experiment.project_id == project_id).order_by(Experiment.created_at.desc())
     ).all()
     return [_to_out(e) for e in rows]
+
+
+# Iteration 4 — Phase-view endpoint declared BEFORE the
+# /experiments/{exp_id} routes so the static "phase-view" path wins
+# over the dynamic {exp_id} path. (FastAPI/Starlette matches routes in
+# declaration order; otherwise the `{exp_id}` matcher would consume
+# "phase-view" as an experiment id and 404 with "Experiment not found".)
+@router.get("/api/v1/experiments/phase-view", response_model=PhaseViewOut)
+def get_phase_view() -> PhaseViewOut:
+    """Return the user-facing phase / status labels as a single document.
+
+    Iteration 4 — the front-end previously maintained its own copy of
+    these label tables in `lib/labels.ts` and `lib/stageLabels.ts`, which
+    drifted from the backend's `STAGE_USER_VIEW` / `EXPERIMENT_STATUS_ZH`
+    / `STAGE_STATUS_ZH` over time (e.g. `EXPERIMENT_STATUS_LABELS` still
+    referenced the deprecated `scaffolded` / `generated` / `done` /
+    `smoke_failed` keys while the backend was emitting `draft` /
+    `running` / `completed` / `failed`). This endpoint is the single
+    source of truth: the front-end hydrates once per page session and
+    caches the response in localStorage under `zsci.phase-view.v1`.
+
+    Returning a single endpoint (instead of three separate ones) means
+    the front-end has one fetch + one cache key to invalidate, and the
+    schemas can stay in lock-step with `app.experiments.states`.
+    """
+    from app.experiments.states import (
+        EXPERIMENT_STATUS_ZH,
+        STAGE_STATUS_ZH,
+        STAGE_USER_VIEW,
+    )
+    from app.schemas import PhaseViewItem
+
+    phases = [
+        PhaseViewItem(
+            key=k,
+            name=v["name"],
+            summary=v["summary"],
+            icon=v["icon"],
+        )
+        for k, v in STAGE_USER_VIEW.items()
+    ]
+    return PhaseViewOut(
+        phases=phases,
+        experiment_status_zh=dict(EXPERIMENT_STATUS_ZH),
+        stage_status_zh=dict(STAGE_STATUS_ZH),
+    )
 
 
 @router.get("/api/v1/experiments/{exp_id}", response_model=ExperimentOut)
@@ -288,6 +431,397 @@ def list_runs(exp_id: str, db: Session = Depends(get_db)) -> list[RunOut]:
         select(ExperimentRun).where(ExperimentRun.experiment_id == exp_id).order_by(ExperimentRun.created_at.desc())
     ).all()
     return [RunOut.model_validate(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# 9-stage interactive workflow (see app/experiments/states.py)
+# ---------------------------------------------------------------------------
+
+
+def _stage_row_to_out(row, *, checkpoint_summary: dict | None = None) -> "ExperimentStageOut":
+    """Convert a DB ExperimentStage row to the API schema.
+
+    Decodes the *_json columns on the way out so the front-end doesn't
+    need to JSON.parse every field. Tolerates malformed JSON (returns
+    None / [] for the affected field rather than crashing).
+    """
+    from app.experiments.stages import STAGE_REGISTRY
+    from app.schemas import ExperimentStageOut
+
+    def _jd(s: str | None) -> dict | None:
+        if not s:
+            return None
+        try:
+            v = json.loads(s)
+            return v if isinstance(v, dict) else None
+        except (ValueError, TypeError):
+            return None
+
+    def _jl(s: str | None) -> list | None:
+        if not s:
+            return None
+        try:
+            v = json.loads(s)
+            return v if isinstance(v, list) else None
+        except (ValueError, TypeError):
+            return None
+
+    sd = STAGE_REGISTRY.get(row.stage_key)
+    return ExperimentStageOut(
+        id=row.id,
+        experiment_id=row.experiment_id,
+        stage_key=row.stage_key,
+        stage_name_zh=sd.name_zh if sd else row.stage_key,
+        description=sd.description if sd else "",
+        requires_user=sd.requires_user if sd else False,
+        optional_user=sd.optional_user if sd else False,
+        expected_seconds=sd.expected_seconds if sd else 0,
+        version=row.version or 1,
+        status=row.status,
+        inputs_json=_jd(row.inputs_json),
+        outputs_json=_jd(row.outputs_json),
+        artifacts_json=_jl(row.artifacts_json),
+        config_json=_jd(row.config_json),
+        user_decisions_json=_jl(row.user_decisions_json),
+        dependencies=_jl(row.dependencies),
+        invalidated_by_stage_id=row.invalidated_by_stage_id,
+        # `started_at` / `ended_at` are kept as `str` (only `created_at` /
+        # `updated_at` got promoted to `datetime` in M34) — `iso_utc` returns
+        # either a string or None, which matches the field type.
+        started_at=iso_utc(row.started_at),
+        ended_at=iso_utc(row.ended_at),
+        # M34: pass naive datetimes; ZSciBaseModel's serializer appends 'Z'.
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+        checkpoint_summary=checkpoint_summary,
+    )
+
+
+def _synth_phase_cells() -> list[dict]:
+    """For brand-new experiments (no stage rows yet), synthesize 5 cells
+    in `not_started` so the page doesn't render 5 "已归档" blocks. The
+    orchestrator will replace these with real rows as it runs each phase.
+    """
+    from app.experiments.states import STAGE_KEYS, STAGE_NAME_ZH
+
+    return [
+        {
+            "stage_key": k,
+            "stage_name_zh": STAGE_NAME_ZH[k],
+            "status": "not_started",
+            "version": 0,
+            "description": "",
+        }
+        for k in STAGE_KEYS
+    ]
+
+
+@router.get("/api/v1/experiments/{exp_id}/stages", response_model=StageProgressOut)
+def list_stages(exp_id: str, db: Session = Depends(get_db)) -> StageProgressOut:
+    """Return the 5-phase progress for an experiment.
+
+    The orchestrator upserts one row per `(experiment_id, stage_key)` (5
+    rows total — phase keys). Brand-new experiments have no rows yet, so
+    we synthesize 5 `not_started` cells (was previously 9 "archived" cells,
+    which made the page look like all stages were done — bug #4).
+
+    `checkpoint_summary` is populated only for the stage currently in
+    `waiting_for_user` status, sourced from the matching AgentTask's
+    `checkpoint_payload_json` column. `last_error` carries the most
+    recent friendly error so the page can render a "失败" banner.
+    """
+    from app.db.models import AgentTask, AgentTaskEvent, ExperimentStage
+    from app.schemas import StageProgressOut
+
+    exp = db.get(Experiment, exp_id)
+    if exp is None:
+        raise HTTPException(404, "Experiment not found")
+
+    rows = db.scalars(
+        select(ExperimentStage)
+        .where(ExperimentStage.experiment_id == exp_id)
+        .order_by(ExperimentStage.stage_key)
+    ).all()
+
+    # Resolve the active checkpoint summary + last error from the running task.
+    checkpoint_summary: dict | None = None
+    last_error: str | None = None
+    # Bug fix (M31): scope to THIS experiment's autonomous task, not any
+    # `experiment.autonomous_run` row in the system — otherwise a second
+    # in-flight experiment hijacks the first's checkpoint_summary.
+    pending_task = _find_autonomous_task_for_experiment(db, exp_id)
+    if pending_task is not None:
+        if pending_task.status == "running" and pending_task.checkpoint_payload_json:
+            try:
+                checkpoint_summary = json.loads(pending_task.checkpoint_payload_json)
+            except (ValueError, TypeError):
+                checkpoint_summary = None
+        if pending_task.status == "failed":
+            # Prefer AgentTask.error (set by the orchestrator's friendly
+            # handler); fall back to the most recent kind="error" event.
+            last_error = pending_task.error or None
+            if not last_error:
+                err_event = db.scalar(
+                    select(AgentTaskEvent)
+                    .where(
+                        AgentTaskEvent.task_id == pending_task.id,
+                        AgentTaskEvent.kind == "error",
+                    )
+                    .order_by(AgentTaskEvent.created_at.desc())
+                )
+                if err_event is not None:
+                    last_error = err_event.message
+
+    if not rows:
+        # Brand-new (or legacy) experiment — synthesize 5 not_started cells.
+        return StageProgressOut(
+            experiment_id=exp_id,
+            overall_status=exp.overall_status or "draft",
+            current_stage=exp.current_stage,
+            mode=exp.mode or "interactive",
+            stages=[_stage_row_to_out_legacy(s, exp=exp) for s in _synth_phase_cells()],
+            decision_history=_decision_history(exp),
+            last_error=last_error,
+        )
+
+    stage_outs = []
+    for r in rows:
+        # Only the active checkpoint gets the summary.
+        this_summary = (
+            checkpoint_summary
+            if r.status == "waiting_for_user"
+            else None
+        )
+        stage_outs.append(_stage_row_to_out(r, checkpoint_summary=this_summary))
+    return StageProgressOut(
+        experiment_id=exp_id,
+        overall_status=exp.overall_status or "draft",
+        current_stage=exp.current_stage,
+        mode=exp.mode or "interactive",
+        stages=stage_outs,
+        decision_history=_decision_history(exp),
+        last_error=last_error,
+    )
+
+
+def _stage_row_to_out_legacy(synth: dict, exp: Experiment | None = None) -> "ExperimentStageOut":
+    """Adapt a synthesized phase dict to the ExperimentStageOut schema.
+    `exp` is used for the created_at/updated_at timestamps when supplied
+    (otherwise they're empty strings, which the front-end renders as '—')."""
+    from app.experiments.states import STAGE_DEPENDS_ON, STAGE_NAME_ZH, STAGE_POLICY
+    from app.schemas import ExperimentStageOut
+
+    return ExperimentStageOut(
+        id=f"legacy-{synth['stage_key']}",
+        experiment_id=exp.id if exp is not None else "",
+        stage_key=synth["stage_key"],
+        stage_name_zh=STAGE_NAME_ZH.get(synth["stage_key"], synth["stage_key"]),
+        description="",
+        requires_user=STAGE_POLICY.get(synth["stage_key"], {}).get("requires_user", False),
+        optional_user=STAGE_POLICY.get(synth["stage_key"], {}).get("optional_user", False),
+        expected_seconds=0,
+        version=1,
+        status=synth.get("status", "not_started"),
+        inputs_json=None, outputs_json=None, artifacts_json=None, config_json=None,
+        user_decisions_json=None, dependencies=list(STAGE_DEPENDS_ON.get(synth["stage_key"], ())),
+        invalidated_by_stage_id=None,
+        started_at=None, ended_at=None,
+        created_at=iso_utc(exp.created_at) if exp is not None else "",
+        updated_at=iso_utc(exp.updated_at) if exp is not None else "",
+        checkpoint_summary=None,
+    )
+
+
+def _decision_history(exp: Experiment) -> list[dict]:
+    if not exp.decision_history_json:
+        return []
+    try:
+        v = json.loads(exp.decision_history_json)
+        return v if isinstance(v, list) else []
+    except (ValueError, TypeError):
+        return []
+
+
+# ---------------------------------------------------------------------------
+# Stage decision + fork endpoints (Week 2 / Week 4)
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/api/v1/experiments/{exp_id}/decide",
+    response_model=ExperimentStageDecisionOut,
+)
+def decide_stage(
+    exp_id: str, payload: ExperimentStageDecision, db: Session = Depends(get_db)
+) -> ExperimentStageDecisionOut:
+    """Resolve a pending checkpoint on the experiment's current phase.
+
+    The orchestrator, when it blocks at a `requires_user` checkpoint, writes
+    an `Approval` row (status=pending) with `action_type=experiment.stage.<k>`
+    and sets `AgentTask.checkpoint_payload_json`. This endpoint:
+
+      1. Finds the running AgentTask for this experiment (its pending Approval).
+      2. Writes the decision into the Approval's payload_json +
+         status (approved/rejected), and into the experiment's
+         decision_history_json.
+      3. Applies the per-decision side effect:
+       - approve: leave the phase completed, unblock the orchestrator.
+       - edit: stash `decision_payload` into the Approval payload so the
+         orchestrator's `edit` branch overrides the phase outputs.
+       - skip: mark phase skipped + downstream outdated.
+       - abort: mark phase needs_revision + orchestrator stops.
+      4. Resume the orchestrator (set the asyncio pause event).
+
+    Note: fork / select_resume_point / redo are intentionally NOT exposed
+    here. The fork endpoint still exists (`/fork`) for the backend API,
+    but the UI no longer surfaces those buttons.
+    """
+    from app.db.models import AgentTask, Approval, ExperimentStage
+    from app.experiments.orchestrator import resume_experiment
+    from app.experiments.stages import mark_downstream_outdated
+
+    exp = db.get(Experiment, exp_id)
+    if exp is None:
+        raise HTTPException(404, "Experiment not found")
+
+    # The running autonomous task owns the pending checkpoint. Bug fix (M31):
+    # scope to THIS experiment's task (parsed from input_json) so multiple
+    # concurrent experiments don't cross-decide each other.
+    task = _find_autonomous_task_for_experiment(db, exp_id)
+    if task is None or task.status != "running":
+        raise HTTPException(409, "没有正在运行的自主实验任务,无法决策")
+
+    approval = db.scalar(
+        select(Approval).where(
+            Approval.task_id == task.id,
+            Approval.status == "pending",
+        ).order_by(Approval.created_at.desc())
+    )
+    if approval is None:
+        raise HTTPException(409, "当前没有待决策的 checkpoint")
+
+    decision = payload.decision
+    target_stage_key = exp.current_stage
+    if payload.target_stage_id:
+        tgt = db.get(ExperimentStage, payload.target_stage_id)
+        if tgt is not None:
+            target_stage_key = tgt.stage_key
+
+    # Merge decision into the approval payload (enrich + set status).
+    try:
+        apv_payload = json.loads(approval.payload_json) if approval.payload_json else {}
+    except (ValueError, TypeError):
+        apv_payload = {}
+    apv_payload["decision_kind"] = decision
+    apv_payload["decision_payload"] = payload.payload or {}
+    apv_payload["target_stage_key"] = target_stage_key
+    approval.payload_json = json.dumps(apv_payload, ensure_ascii=False)
+    # Map abort -> rejected (the orchestrator reads status=rejected as abort);
+    # everything else counts as approved (the decision_kind carries nuance).
+    approval.status = "rejected" if decision == "abort" else "approved"
+    approval.decision_at = datetime.now(UTC)
+
+    # Apply per-decision side effects (only the 4 surfaced in the UI).
+    if decision == "skip":
+        stage_row = db.scalar(
+            select(ExperimentStage).where(
+                ExperimentStage.experiment_id == exp_id,
+                ExperimentStage.stage_key == target_stage_key,
+            )
+        )
+        if stage_row is not None:
+            stage_row.status = "skipped"
+            mark_downstream_outdated(db, exp_id, target_stage_key, invalidated_by_stage_id=stage_row.id)
+    elif decision == "abort":
+        stage_row = db.scalar(
+            select(ExperimentStage).where(
+                ExperimentStage.experiment_id == exp_id,
+                ExperimentStage.stage_key == target_stage_key,
+            )
+        )
+        if stage_row is not None:
+            stage_row.status = "needs_revision"
+        exp.overall_status = "paused"
+
+    # Append to the experiment's decision history trail (with explicit Z so
+    # the front-end parses in the user's local timezone).
+    history = _decision_history(exp)
+    history.append({
+        "stage_key": target_stage_key,
+        "decision": decision,
+        "target_stage_id": payload.target_stage_id,
+        "at": iso_utc(approval.decision_at),
+        "fork_experiment_id": None,
+    })
+    exp.decision_history_json = json.dumps(history, ensure_ascii=False, default=str)
+
+    db.commit()
+
+    # Wake the orchestrator's checkpoint poll (unless abort, which the
+    # orchestrator detects via status=rejected).
+    resume_experiment(task.id)
+
+    return ExperimentStageDecisionOut(
+        ok=True,
+        decision=decision,
+        experiment_id=exp_id,
+        task_id=task.id,
+        fork_experiment_id=None,
+    )
+
+
+@router.post("/api/v1/experiments/{exp_id}/fork", response_model=ExperimentOut)
+def fork_experiment_endpoint(
+    exp_id: str, payload: ForkRequest, db: Session = Depends(get_db)
+) -> ExperimentOut:
+    """Fork an experiment at a stage without going through a checkpoint
+    decision (direct API). Useful for the BranchTree UI."""
+    from app.db.models import ExperimentStage
+    from app.experiments.forking import fork_experiment as _fork
+
+    exp = db.get(Experiment, exp_id)
+    if exp is None:
+        raise HTTPException(404, "Experiment not found")
+    tgt = db.get(ExperimentStage, payload.target_stage_id)
+    if tgt is None:
+        raise HTTPException(404, "target stage not found")
+    new_exp = _fork(
+        db,
+        source_experiment_id=exp_id,
+        fork_stage_key=tgt.stage_key,
+        title=payload.title,
+        branch_name=payload.branch_name,
+    )
+    return _to_out(new_exp)
+
+
+@router.get("/api/v1/experiments/{exp_id}/branches", response_model=list[BranchOut])
+def list_branches(exp_id: str, db: Session = Depends(get_db)) -> list[BranchOut]:
+    """Return the branch graph visible from this experiment (its own fork
+    record + any experiments that forked from it)."""
+    from app.db.models import ExperimentStage
+    from app.experiments.forking import list_branches_for_experiment
+
+    if db.get(Experiment, exp_id) is None:
+        raise HTTPException(404, "Experiment not found")
+    rows = list_branches_for_experiment(db, exp_id)
+    out: list[BranchOut] = []
+    for b in rows:
+        fork_key = None
+        if b.fork_stage_id:
+            st = db.get(ExperimentStage, b.fork_stage_id)
+            fork_key = st.stage_key if st is not None else None
+        out.append(BranchOut(
+            id=b.id,
+            experiment_id=b.experiment_id,
+            parent_experiment_id=b.parent_experiment_id,
+            parent_branch_id=b.parent_branch_id,
+            fork_stage_id=b.fork_stage_id,
+            fork_stage_key=fork_key,
+            branch_name=b.branch_name,
+            created_at=b.created_at.isoformat() if b.created_at else "",
+        ))
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -494,13 +1028,50 @@ def generate_code(
 # ---------------------------------------------------------------------------
 
 
+@router.patch("/api/v1/experiments/{exp_id}", response_model=ExperimentOut)
+def patch_experiment(
+    exp_id: str, patch: ExperimentUpdate, db: Session = Depends(get_db)
+) -> ExperimentOut:
+    """Update mutable fields on an experiment (title / research_question /
+    hypothesis). Used by the detail page to let the user fill in the
+    research question before starting the workflow.
+    """
+    exp = db.get(Experiment, exp_id)
+    if exp is None:
+        raise HTTPException(404, "Experiment not found")
+    if patch.title is not None:
+        exp.title = patch.title
+    if patch.research_question is not None:
+        exp.research_question = patch.research_question
+    if patch.hypothesis is not None:
+        exp.hypothesis = patch.hypothesis
+    db.commit()
+    db.refresh(exp)
+    return _to_out(exp)
+
+
 @router.post("/api/v1/experiments/{exp_id}/autonomous")
 async def start_autonomous(
-    exp_id: str, payload: dict, db: Session = Depends(get_db)
+    exp_id: str,
+    payload: dict,
+    mode: str = Query("interactive", description="interactive | auto (legacy 5-stage linear)"),
+    db: Session = Depends(get_db),
 ) -> dict:
-    """Start the autonomous experiment agent in the background. Returns the
-    agent task id whose event stream (GET /agent/tasks/{id}/stream) tracks
-    progress."""
+    """Start the experiment workflow in the background.
+
+    `?mode=interactive` (default) — the 5-phase registry with checkpoint
+    pauses; the user must approve each phase before the next runs.
+    `?mode=auto` — the legacy 5-stage linear pipeline (no checkpoints).
+
+    Returns the agent task id whose event stream (GET /agent/tasks/{id}/stream)
+    tracks progress. The front-end's StageProgress component polls
+    GET /experiments/{id}/stages for the structured progress + the
+    latest checkpoint summary.
+
+    Validates: research_question must be non-empty (bug #2 — users were
+    seeing cryptic `research_question is empty - please fill it in ...`
+    errors after the workflow had already started).
+    """
     exp = db.get(Experiment, exp_id)
     if exp is None:
         raise HTTPException(404, "Experiment not found")
@@ -508,17 +1079,43 @@ async def start_autonomous(
     if project is None:
         raise HTTPException(404, "Project not found")
 
+    if mode not in ("interactive", "auto"):
+        raise HTTPException(400, "mode must be 'interactive' or 'auto'")
+
+    rq = (exp.research_question or payload.get("research_question") or "").strip()
+    if not rq:
+        # Iteration 4 — friendly Chinese copy; previously this was
+        # "请先填写研究问题,再启动实验" which still surfaced the technical
+        # "研究问题" term and didn't hint at the recovery path.
+        # Now mirrors the create_experiment 422 wording so users see a
+        # consistent message whether they hit the gate on creation or
+        # on start.
+        raise HTTPException(
+            422,
+            "请先描述要研究的问题,再启动实验。"
+            "你可以在实验设置里补充,或在启动时直接填写。",
+        )
+
     input_data = {
         # experiment_id is stored here (not a FK column on agent_tasks - create_all
         # doesn't alter existing tables) so GET /workflows/active can deep-link the
         # sidebar entry back to this experiment.
         "experiment_id": exp_id,
-        "research_question": exp.research_question or payload.get("research_question", ""),
+        "mode": mode,
+        "research_question": rq,
         "selected_papers": payload.get("selected_papers", []),
         "selected_repositories": payload.get("selected_repositories", []),
-        "benchmarks_query": payload.get("benchmarks_query") or exp.research_question or exp.title or "",
+        "benchmarks_query": payload.get("benchmarks_query") or rq or exp.title or "",
         "run_configs": payload.get("run_configs") or ["baseline"],
+        # New runs by default resume from the first non-completed phase
+        # (so retrying a failed experiment picks up where it crashed).
+        "resume": True,
     }
+    # Persist the mode on the experiment row so /stages returns it.
+    exp.mode = mode
+    # Allow retry: failed → running is a legal transition (see EXP_TRANSITIONS).
+    if exp.overall_status in (None, "draft", "archived", "failed"):
+        exp.overall_status = "running"
     task = AgentTask(
         id=new_id("task"),
         project_id=project.id,
@@ -528,6 +1125,16 @@ async def start_autonomous(
     )
     db.add(task)
     db.commit()
+
+    # Pick the orchestrator entry point based on `mode`. The 9-stage
+    # `run_autonomous_experiment_v2` walks STAGE_REGISTRY + checkpoints at
+    # each stage that requires_user; the legacy `run_autonomous_experiment`
+    # is preserved for `?mode=auto`.
+    runner = (
+        run_autonomous_experiment_v2
+        if mode == "interactive"
+        else run_autonomous_experiment
+    )
 
     # Fire-and-forget the background orchestrator. It opens its own sessions
     # and commits events as it goes; the SSE stream on /agent/tasks/{id}/stream
@@ -542,7 +1149,7 @@ async def start_autonomous(
             _mark_terminal(task.id, "failed", f"orchestrator crashed: {t.exception()}")
 
     bg = asyncio.create_task(
-        run_autonomous_experiment(
+        runner(
             task_id=task.id,
             experiment_id=exp_id,
             project_id=project.id,
@@ -550,12 +1157,19 @@ async def start_autonomous(
         )
     )
     bg.add_done_callback(_on_done)
-    return {"task_id": task.id, "experiment_id": exp_id}
+    return {"task_id": task.id, "experiment_id": exp_id, "mode": mode}
 
 
 def _mark_terminal(task_id: str, status: str, error: str | None) -> None:
     """Backstop: ensure a background autonomous task reaches a terminal state
-    even if its orchestrator crashed before its own try/except could mark it."""
+    even if its orchestrator crashed before its own try/except could mark it.
+
+    Bug fix (M32): previously only marked the AgentTask; the matching
+    Experiment row stayed "running" forever and the UI showed a ghost
+    running status with no recovery path. Now also flip the experiment's
+    `overall_status` and the in-flight stage row so the page renders the
+    "失败" banner with the "重试" button (see ExperimentDetailPage).
+    """
     from app.db.session import get_sessionmaker
 
     try:
@@ -565,6 +1179,33 @@ def _mark_terminal(task_id: str, status: str, error: str | None) -> None:
                 row.status = status
                 if error:
                     row.error = error
+                # Best-effort: flip the owning experiment + current stage row.
+                exp_id = None
+                if row.input_json:
+                    try:
+                        inp = json.loads(row.input_json)
+                        if isinstance(inp, dict):
+                            exp_id = inp.get("experiment_id")
+                    except (ValueError, TypeError):
+                        pass
+                if exp_id:
+                    exp = db.get(Experiment, exp_id)
+                    if exp is not None and exp.overall_status in (
+                        "running", "waiting_user", "draft"
+                    ):
+                        exp.overall_status = "failed"
+                    if exp is not None and exp.current_stage:
+                        from app.db.models import ExperimentStage
+                        stage = db.scalar(
+                            select(ExperimentStage).where(
+                                ExperimentStage.experiment_id == exp_id,
+                                ExperimentStage.stage_key == exp.current_stage,
+                            )
+                        )
+                        if stage is not None and stage.status in (
+                            "running", "waiting_for_user", "draft"
+                        ):
+                            stage.status = "failed"
                 db.commit()
     except Exception:  # noqa: BLE001
         pass
@@ -613,3 +1254,273 @@ def get_experiment_file(exp_id: str, path: str, db: Session = Depends(get_db)) -
     if not target.is_file():
         raise HTTPException(404, "File not found")
     return {"path": path, "content": target.read_text(encoding="utf-8", errors="replace")}
+
+
+# ---------------------------------------------------------------------------
+# Phase C/D — 研究计划确认 / 结果下一步(非技术化视图)
+# 端点消费 experiment_stages.outputs_json(plan / analysis)并把
+# 内部字段翻译成面向科研用户的描述,避免前端直接读到 phase_* 内部 key。
+# ---------------------------------------------------------------------------
+
+
+def _safe_json_load(raw: str | None) -> dict:
+    if not raw:
+        return {}
+    try:
+        v = json.loads(raw)
+        return v if isinstance(v, dict) else {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _latest_stage_outputs(
+    db: Session, experiment_id: str, stage_key: str
+) -> dict:
+    """Return the most recent outputs_json dict for a given stage, or {}."""
+    from app.db.models import ExperimentStage
+
+    row = db.scalars(
+        select(ExperimentStage)
+        .where(
+            ExperimentStage.experiment_id == experiment_id,
+            ExperimentStage.stage_key == stage_key,
+        )
+        .order_by(ExperimentStage.version.desc())
+        .limit(1)
+    ).first()
+    if row is None:
+        return {}
+    return _safe_json_load(row.outputs_json)
+
+
+def _find_autonomous_task_for_experiment(
+    db: Session, experiment_id: str
+) -> AgentTask | None:
+    """Find the most recent `experiment.autonomous_run` task for THIS experiment.
+
+    Bug fix (M31): the previous implementation picked ANY `experiment.autonomous_run`
+    AgentTask with `status='running'` across all experiments, which misroutes
+    /decide + /stages.checkpoint_summary when the user has more than one
+    in-flight experiment. The orchestrator writes `experiment_id` into
+    `input_json` (no FK column on `agent_tasks` per create_all dev convention);
+    we parse it here and filter.
+    """
+    candidates = db.scalars(
+        select(AgentTask)
+        .where(
+            AgentTask.task_type == "experiment.autonomous_run",
+            AgentTask.status.in_(("running", "failed", "completed", "stopped")),
+        )
+        .order_by(AgentTask.created_at.desc())
+        .limit(50)
+    ).all()
+    for t in candidates:
+        if not t.input_json:
+            continue
+        try:
+            inp = json.loads(t.input_json)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(inp, dict) and inp.get("experiment_id") == experiment_id:
+            return t
+    return None
+
+
+@router.get(
+    "/api/v1/experiments/{exp_id}/preview-plan",
+    response_model=PlanPreviewOut,
+)
+def get_preview_plan(
+    exp_id: str, db: Session = Depends(get_db)
+) -> PlanPreviewOut:
+    """面向用户的研究计划确认视图。
+
+    来源:experiment_stages(stage_key='phase_1_plan').outputs_json 的 8 个字段
+    (goal/hypothesis/metrics/baselines/run_specs/fairness_note/compute_plan/risks)。
+
+    若该实验尚未进入 phase_1_plan,返回 has_plan=False 且所有字段为 None;
+    前端按"计划待生成"路径渲染,主 CTA 不阻塞。
+    """
+    exp = db.get(Experiment, exp_id)
+    if exp is None:
+        raise HTTPException(404, "Experiment not found")
+
+    plan = _latest_stage_outputs(db, exp_id, "phase_1_plan")
+    if not plan:
+        return PlanPreviewOut(has_plan=False)
+
+    metrics_raw = plan.get("metrics") or []
+    metrics: list[PlanPreviewMetricOut] = []
+    if isinstance(metrics_raw, list):
+        for m in metrics_raw:
+            if isinstance(m, dict):
+                metrics.append(
+                    PlanPreviewMetricOut(
+                        name=str(m.get("name") or "未命名指标"),
+                        definition=m.get("definition") if isinstance(m.get("definition"), str) else None,
+                        aggregation=m.get("aggregation") if isinstance(m.get("aggregation"), str) else None,
+                    )
+                )
+            elif isinstance(m, str):
+                metrics.append(PlanPreviewMetricOut(name=m))
+
+    run_specs = plan.get("run_specs") or []
+    scope: str | None = None
+    if isinstance(run_specs, list) and run_specs:
+        scope = "本轮对照与变体:" + "、".join(str(s) for s in run_specs if s)
+
+    risks_raw = plan.get("risks") or []
+    risks: list[str] = [str(r) for r in risks_raw if isinstance(r, (str, int))]
+
+    compute_plan_val = plan.get("compute_plan")
+    compute_plan: str | None = (
+        str(compute_plan_val) if compute_plan_val not in (None, "") else None
+    )
+
+    return PlanPreviewOut(
+        goal=plan.get("goal") if isinstance(plan.get("goal"), str) else None,
+        hypothesis=plan.get("hypothesis") if isinstance(plan.get("hypothesis"), str) else None,
+        scope=scope,
+        fairness_note=plan.get("fairness_note") if isinstance(plan.get("fairness_note"), str) else None,
+        compute_plan=compute_plan,
+        risks=risks,
+        metrics=metrics,
+        # 估计耗时是面向用户的"初步估计",后端不强行算,留给前端做兜底。
+        est_minutes=None,
+        success_means=None,
+        failure_means=None,
+        has_plan=True,
+    )
+
+
+_RECOMMENDATION_TO_JUDGEMENT: dict[str, str] = {
+    "publish": "continue",
+    "iterate": "adjust",
+    "inconclusive": "insufficient",
+    "abort": "pivot",
+}
+
+_NEXT_STEP_TEMPLATE_HINTS: list[tuple[str, str]] = [
+    ("重跑", "iterate"),
+    ("重新训练", "iterate"),
+    ("复现", "iterate"),
+    ("扩大", "change_dataset"),
+    ("增加数据", "change_dataset"),
+    ("写作", "into_writing"),
+    ("起稿", "into_writing"),
+    # 顺序:具体意图(分支/写作)在通用意图(新方向/创新)前,因为
+    # "尝试新方向作为分支"应被理解为分支,而不是笼统的创新。
+    ("分支", "branch"),
+    ("新方向", "novel"),
+    ("创新", "novel"),
+]
+
+
+def _next_step_template(title: str, description: str | None) -> str:
+    text = (title or "") + " " + (description or "")
+    for hint, template in _NEXT_STEP_TEMPLATE_HINTS:
+        if hint in text:
+            return template
+    return "iterate"
+
+
+@router.get(
+    "/api/v1/experiments/{exp_id}/next-steps",
+    response_model=NextStepsOut,
+)
+def get_next_steps(
+    exp_id: str, db: Session = Depends(get_db)
+) -> NextStepsOut:
+    """面向用户的实验后续研究方向视图。
+
+    来源:experiment_stages(stage_key='phase_4_report').outputs_json.analysis
+    的 recommendation / next_steps / best_metric / best_run / vs_sota 等。
+
+    若实验未到 analysis 阶段,返回 has_analysis=False 且 next_steps=[];
+    前端按"系统在整理"路径渲染。
+    """
+    exp = db.get(Experiment, exp_id)
+    if exp is None:
+        raise HTTPException(404, "Experiment not found")
+
+    report = _latest_stage_outputs(db, exp_id, "phase_4_report")
+    analysis = report.get("analysis")
+    if not isinstance(analysis, dict):
+        return NextStepsOut(has_analysis=False)
+
+    recommendation = analysis.get("recommendation")
+    judgement: str | None = None
+    if isinstance(recommendation, str):
+        judgement = _RECOMMENDATION_TO_JUDGEMENT.get(
+            recommendation.lower(), recommendation
+        )
+
+    metrics: dict[str, float | int | str] = {}
+    best_metric = analysis.get("best_metric")
+    if isinstance(best_metric, dict):
+        name = best_metric.get("name")
+        value = best_metric.get("value")
+        if isinstance(name, str) and value is not None:
+            metrics[name] = value
+    series = report.get("series")
+    if isinstance(series, list):
+        # 若 analysis 没有 best_metric,取最近一次 series 的 metrics
+        if not metrics:
+            for entry in reversed(series):
+                if isinstance(entry, dict):
+                    sm = entry.get("metrics")
+                    if isinstance(sm, dict) and sm:
+                        for k, v in sm.items():
+                            metrics[str(k)] = v
+                        break
+
+    conclusion = analysis.get("ai_judgement")
+    if not isinstance(conclusion, str):
+        vs_sota = analysis.get("vs_sota")
+        conclusion = vs_sota if isinstance(vs_sota, str) else None
+
+    risks_raw = analysis.get("risks") or []
+    risks: list[str] = [str(r) for r in risks_raw if isinstance(r, (str, int))]
+
+    next_steps_raw = analysis.get("next_steps") or []
+    next_steps: list[NextStepOut] = []
+    if isinstance(next_steps_raw, list):
+        for i, step in enumerate(next_steps_raw[:5]):
+            if isinstance(step, str):
+                title = step.strip()
+                if not title:
+                    continue
+                next_steps.append(
+                    NextStepOut(
+                        id=f"step_{i + 1}",
+                        title=title,
+                        description=None,
+                        est_cost=None,
+                        template=_next_step_template(title, None),
+                    )
+                )
+            elif isinstance(step, dict):
+                title = str(step.get("title") or step.get("name") or f"方向 {i + 1}").strip()
+                description = step.get("description")
+                est_cost = step.get("est_cost")
+                next_steps.append(
+                    NextStepOut(
+                        id=f"step_{i + 1}",
+                        title=title,
+                        description=str(description) if isinstance(description, str) else None,
+                        est_cost=str(est_cost) if est_cost is not None else None,
+                        template=_next_step_template(
+                            title,
+                            str(description) if isinstance(description, str) else None,
+                        ),
+                    )
+                )
+
+    return NextStepsOut(
+        conclusion=conclusion,
+        judgement=judgement,
+        metrics=metrics,
+        risks=risks,
+        next_steps=next_steps,
+        has_analysis=True,
+    )

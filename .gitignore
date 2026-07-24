@@ -23,6 +23,10 @@ vite.config.js
 vite.config.d.ts
 *.tsbuildinfo
 
+# Frontend tests (smoke tests live under tests/, gitignored — keep
+# locally for `npm run test:smoke`, not committed)
+frontend/tests/
+
 # --- ZSci workspace (local data, never commit) ---
 workspace/
 !workspace/.gitkeep

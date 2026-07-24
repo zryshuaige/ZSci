@@ -7,12 +7,17 @@ from __future__ import annotations
 
 import json
 import logging
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.agent.evidence import validate_evidence
-from app.agent.prompts import HYPOTHESIS_SYSTEM, TREND_ANALYSIS_SYSTEM
+from app.agent.prompts import (
+    HYPOTHESIS_CANDIDATES_SYSTEM,
+    HYPOTHESIS_SYSTEM,
+    TREND_ANALYSIS_SYSTEM,
+)
 from app.agent.service import register_skill
 from app.agent.state import ResearchAgentState
 from app.db.models import Paper, ReadingNote
@@ -81,20 +86,17 @@ def _build_evidence_pack(
 
 
 def _safe_json_load(text: str) -> dict | None:
-    """Extract the first JSON object from an LLM response (tolerates code fences)."""
-    import re
+    """Extract the first JSON object from an LLM response.
 
-    fence = re.search(r"```(?:json)?\s*(\{.*?\}|\[.*?\])\s*```", text, re.DOTALL)
-    if fence:
-        text = fence.group(1)
-    # find first { ... } or [ ... ]
-    m = re.search(r"(\{.*\}|\[.*\])", text, re.DOTALL)
-    if not m:
-        return None
-    try:
-        return json.loads(m.group(1))
-    except ValueError:
-        return None
+    Delegates to :func:`app.llm.json_utils.extract_json_object`, which
+    tolerates ```json fences, surrounding prose, and truncation. The previous
+    in-place regex required a closing fence and used a non-greedy span, which
+    silently returned None on fenced-but-truncated or prose-wrapped LLM
+    output - leaving the user with zero candidates despite a good LLM result.
+    """
+    from app.llm.json_utils import extract_json_object
+
+    return extract_json_object(text)
 
 
 @register_skill("research.trend_analysis")
@@ -182,6 +184,133 @@ def generate_hypothesis(db: Session, state: ResearchAgentState) -> ResearchAgent
     db.flush()
     state["final_response"] = f"生成了 {len(hypotheses)} 个研究想法，已保存到研究想法库。"
     return state
+
+
+@register_skill("research.generate_hypothesis_candidates")
+def generate_hypothesis_candidates(
+    db: Session, state: ResearchAgentState
+) -> ResearchAgentState:
+    """Generate 3-5 DIFFERENTIATED research directions as candidates.
+
+    Returns:  state['result'] = { candidates: [ ...dicts... ] }
+
+    IMPORTANT: this skill does NOT persist Idea rows. The Multi-Idea
+    candidate-comparison page (Phase B: ExploreIdeasPage) shows the LLM
+    output to the user, then `POST /ideas/bulk` is called with the chosen
+    entries. This is the "generate first, persist after user picks" flow
+    that replaces the old auto-insert-then-show behaviour.
+    """
+    pack, evidence = _build_evidence_pack(
+        db, state.get("selected_papers", []), state["project_id"]
+    )
+    gw = get_gateway()
+    if not gw.is_configured("default_chat"):
+        raise ModelNotConfigured("default_chat")
+
+    topic = state.get("user_request") or "(未指定研究方向)"
+    messages = [
+        {"role": "system", "content": HYPOTHESIS_CANDIDATES_SYSTEM},
+        {
+            "role": "user",
+            "content": (
+                f"用户的模糊研究想法:{topic}\n\n论文证据包:\n{pack}\n\n"
+                f"请生成 3-5 个差异化的研究方向候选(JSON)。"
+            ),
+        },
+    ]
+    raw = gw.chat(messages, role="default_chat", temperature=0.6, max_tokens=3000)
+    parsed = _safe_json_load(raw) or {}
+
+    candidates_raw = parsed.get("candidates", [])
+    candidates: list[dict] = []
+    for c in candidates_raw:
+        if not isinstance(c, dict):
+            continue
+        name = (
+            c.get("name")
+            or c.get("title")
+            or c.get("标题")
+            or ""
+        )
+        candidates.append({
+            "name": name.strip() or "未命名方向",
+            "hypothesis": str(c.get("hypothesis") or "").strip(),
+            "motivation": str(c.get("motivation") or "").strip(),
+            "one_liner": str(c.get("one_liner") or "").strip(),
+            "feasibility": _clamp_stars(c.get("feasibility")),
+            "novelty": _clamp_stars(c.get("novelty")),
+            "est_cost": _normalise_cost(c.get("est_cost")),
+            "est_days": _clamp_days(c.get("est_days")),
+            "recommended": bool(c.get("recommended")) if "recommended" in c else False,
+            "targets": _to_str_list(c.get("targets")),
+            "baseline_methods": _to_str_list(c.get("baseline_methods")),
+            "key_differences": _to_str_list(c.get("key_differences")),
+            "evidence_paper_ids": _to_str_list(c.get("evidence_paper_ids")),
+        })
+
+    # At most one `recommended:true`; if LLM gave multiple, keep the first
+    # (best-effort guess) and demote the rest so the UI picks exactly one.
+    seen = False
+    for c in candidates:
+        if c["recommended"]:
+            if seen:
+                c["recommended"] = False
+            else:
+                seen = True
+    # If the LLM produced nothing recommended, default to the candidate with
+    # the highest feasibility+novelty sum so the user sees at least one
+    # AI-marked option.
+    if not seen and candidates:
+        def score(c: dict) -> int:
+            return c["feasibility"] + c["novelty"]
+        candidates[max(range(len(candidates)), key=lambda i: score(candidates[i]))]["recommended"] = True
+
+    merged_evidence = evidence + parsed.get("evidence", [])
+    state["evidence"] = validate_evidence(merged_evidence)
+    state["result"] = {"candidates": candidates, "raw": raw[:2000]}
+    state["final_response"] = (
+        f"生成了 {len(candidates)} 个研究方向候选(用户将从中选择)。"
+    )
+    return state
+
+
+def _clamp_stars(v: Any) -> int:
+    try:
+        n = int(v)
+    except (TypeError, ValueError):
+        n = 2
+    return max(1, min(3, n))
+
+
+def _clamp_days(v: Any) -> int:
+    try:
+        n = int(v)
+    except (TypeError, ValueError):
+        n = 3
+    return max(1, min(10, n))
+
+
+_NORMALISED_COST = {"low", "medium", "high"}
+
+
+def _normalise_cost(v: Any) -> str:
+    s = (str(v or "").strip().lower())
+    if s in _NORMALISED_COST:
+        return s
+    return "medium"
+
+
+def _to_str_list(v: Any) -> list[str]:
+    if v is None:
+        return []
+    if isinstance(v, list):
+        return [str(x) for x in v if str(x).strip()]
+    if isinstance(v, str):
+        return [v.strip()] if v.strip() else []
+    return [str(v)] if str(v).strip() else []
+
+
+
 
 
 def _first_str(h: dict, *keys: str) -> str:

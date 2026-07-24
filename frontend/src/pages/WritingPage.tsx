@@ -8,6 +8,7 @@ import { Card } from "@/components/ui/Card";
 import { Spinner } from "@/components/ui/Dialog";
 import { ShortcutTooltip } from "@/components/ui/Tooltip";
 import { useAgentTaskStatus } from "@/lib/hooks/useAgentTaskStatus";
+import { showFriendlyError } from "@/lib/useFriendlyError";
 
 export default function WritingPage() {
   const { project } = useOutletContext<{ project: Project }>();
@@ -124,6 +125,7 @@ export default function WritingPage() {
       qc.invalidateQueries({ queryKey: ["writing-file", project.id, "main.tex"] });
       setCurrentTemplate(args.template);
     },
+    onError: (err) => showFriendlyError(err),
   });
 
   const compileMutation = useMutation({
@@ -187,6 +189,7 @@ export default function WritingPage() {
       qc.invalidateQueries({ queryKey: ["workflows", "active"] });
       if (task?.id) setActiveDraftTaskId(task.id);
     },
+    onError: (err) => showFriendlyError(err),
   });
 
   // Track the most recent draft task so the button stays in "running" state
@@ -313,11 +316,6 @@ export default function WritingPage() {
               </Card>
             ))}
           </div>
-          {initMutation.isError && (
-            <div className="text-xs text-destructive mt-3 text-center">
-              初始化失败:{(initMutation.error as Error).message}
-            </div>
-          )}
         </div>
       ) : (
         <div className="flex flex-1 min-h-0">
@@ -407,12 +405,6 @@ export default function WritingPage() {
               ) : <Spinner />}
             </div>
           </aside>
-        </div>
-      )}
-
-      {draftMutation.isError && (
-        <div className="p-2 text-xs text-destructive border-t border-border">
-          Agent 草稿生成失败:{(draftMutation.error as Error).message}(需配置 LLM)
         </div>
       )}
     </div>

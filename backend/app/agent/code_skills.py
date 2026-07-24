@@ -196,16 +196,11 @@ def search_github(db: Session, state: ResearchAgentState) -> ResearchAgentState:
 
 
 def _safe_json_load_list(text: str) -> list[dict]:
-    import re
+    """Extract the first JSON array of objects from an LLM response.
 
-    fence = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", text, re.DOTALL)
-    if fence:
-        text = fence.group(1)
-    m = re.search(r"\[.*\]", text, re.DOTALL)
-    if not m:
-        return []
-    try:
-        v = json.loads(m.group(0))
-        return v if isinstance(v, list) else []
-    except ValueError:
-        return []
+    Delegates to :func:`app.llm.json_utils.extract_json_list` (tolerates
+    fences, prose, truncation).
+    """
+    from app.llm.json_utils import extract_json_list
+
+    return extract_json_list(text)

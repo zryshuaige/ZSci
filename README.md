@@ -1,370 +1,196 @@
 # Z-Sci
 
-Z-Sci 把一个研究方向的完整流程搬到本地:搜文献、读论文、整思路、跑实验、写论文,所有产物都在你自己的项目目录里。
+**把一整条科研流程，放进你自己的电脑。**
 
-![Python](https://img.shields.io/badge/Python-3.12-3776AB)
-![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688)
-![React](https://img.shields.io/badge/React-18-61dafb)
-![TypeScript](https://img.shields.io/badge/TypeScript-5.5-3178c6)
-![Vite](https://img.shields.io/badge/Vite-5-646cff)
-![TailwindCSS](https://img.shields.io/badge/Tailwind-3.4-38bdf8)
-![PDF.js](https://img.shields.io/badge/PDF.js-4.5-ff6600)
-![License](https://img.shields.io/badge/License-MIT-green)
+从选题到成文——检索文献、精读 PDF、沉淀想法、管理数据集、运行实验、起草论文——Z-Sci 帮你在本地完成，数据与产物始终属于你。
+
+![Python](https://img.shields.io/badge/Python-3.12-3776AB?style=flat-square)
+![React](https://img.shields.io/badge/React-18-61DAFB?style=flat-square)
+![TypeScript](https://img.shields.io/badge/TypeScript-5.5-3178C6?style=flat-square)
+![Local-first](https://img.shields.io/badge/Local--first-Privacy-1a1a1a?style=flat-square)
+![License](https://img.shields.io/badge/License-MIT-22c55e?style=flat-square)
 
 ---
 
-## Features
+## 为什么是 Z-Sci
+
+科研工具往往要么是「聊天窗口」，要么是「一堆互不关联的脚本」。Z-Sci 面向真实研究节奏：
+
+| 你真正需要的 | Z-Sci 怎么做 |
+| --- | --- |
+| 文献要可追溯 | 检索 → 确认下载 → 本地 PDF + BibTeX，可随时复现 |
+| 阅读要有产出 | 对照阅读、划词翻译、批注、结构化笔记（带页码证据） |
+| 想法不能丢 | 假设、动机、实验方案集中管理，状态可流转 |
+| 实验要可对比 | 标准项目骨架、实时日志、指标曲线、多轮对比 |
+| AI 要可控 | 重要操作需你确认；陈述区分事实 / 推断 / 假设 |
+| 数据要私密 | 默认本地运行，项目文件与数据库都在你的机器上 |
+
+---
+
+## 一条完整研究路径
+
+```text
+创建项目  →  检索文献  →  下载并精读  →  生成 / 整理想法
+    →  查找并加入数据集  →  搭建与运行实验  →  写作与引用校验
+```
+
+左侧始终能看到**进行中的任务**，换页面也不会丢进度；需要时一键回到对应实验或助手任务。
+
+---
+
+## 核心能力
 
 ### 项目管理
-每个研究方向是一个独立项目。创建时在 `workspace/projects/<slug>/` 下生成目录骨架,并写一条 SQLite 记录。删除时连同目录和所有子资源一起清掉。所有后续产物(文献、PDF、笔记、实验、LaTeX)都挂在对应项目目录下,互不干扰。
+每个研究方向是一个独立工作区。文献、PDF、笔记、实验与 LaTeX 工程都挂在同一项目下，互不干扰；删除项目时一并清理本地目录。
 
 ### 文献检索
-通过 OpenAlex 和 arXiv 两个源检索,自动去重。检索结果只返回元数据(标题、作者、年份、会议、引用数、abstract),不会自动下载任何东西。顶会标注基于内置注册表,覆盖 CVPR / ICML / NeurIPS / AAAI / ACL 等主流会议,并区分"已验证顶会"和普通来源。可勾选"仅显示顶会"过滤。
+对接 OpenAlex 与 arXiv，自动去重。先看元数据（标题、作者、会议、引用、摘要），**不会悄悄下载**。内置顶会标注（CVPR / ICML / NeurIPS / AAAI / ACL 等），可一键只看顶会。
 
-### PDF 下载与解析
-从检索结果里选论文后,弹确认框才会下载。PDF 落盘后算 sha256,同时生成 `metadata.json` 和 `paper.bib`(BibTeX 条目)。下载完成后用 PyMuPDF 解析,抽取页级文本、章节结构、图片信息,供翻译、笔记、Agent 引用使用。解析状态会在论文详情里显示(未解析 / 解析中 / 成功 / 失败)。
+### 精读与笔记
+三栏阅读：原文 · 翻译 · 笔记。划词即可翻译或批注，内容按页保存。可生成结构化阅读笔记——事实性表述会尽量附带页码依据，便于复查。
 
-### PDF 三栏阅读器
-基于 PDF.js 的阅读器,左侧原文,右侧分三个 tab:翻译、笔记、元数据。选中文本即可翻译或加入批注。翻译和批注都按页保存,再次打开时还在。笔记 tab 里可以一键让 Agent 基于已抽取的论文文本生成结构化阅读笔记,笔记里的事实声明会带页码证据,不允许模型凭空编造。生成的笔记支持手动编辑和保存。
+### 研究想法
+手动记录，或基于已下载论文智能生成可验证假设。每条想法可展开完整方案（最小实验、指标、成功/失败判据、风险与证据等），状态支持：待评估 → 待验证 → 已采纳 / 已否决。
 
-### Agent 任务中心
-内置 4 个 Agent 技能,通过 LangGraph 编排:
-
-- `research.trend_analysis` — 基于已下载论文做研究趋势分析
-- `research.generate_hypothesis` — 基于已有文献生成可验证假设,结果落到研究想法库
-- `code.search_github` — 检索 GitHub 上和某篇论文相关的代码仓库,并保守判断官方性(official / author_affiliated / community / unverified)
-- `writing.draft_section` — 基于已验证引用和已完成的实验 run 起草论文章节
-
-Agent 产出的陈述会强制区分为四类证据:事实、推断、假设、待验证,事实声明必须带来源引用。任务执行过程中的事件实时流式可见。涉及下载文件、写文件、运行 shell 命令的操作都要用户在审批门里点头才会执行,所有这些操作都写入 `audit_log` 表可追溯。
-
-### 研究想法库
-Agent 生成的假设和你手动添加的灵感都放在这里,带状态流转:backlog → hypothesis → decision 或 rejected。每个想法记录标题、假设、动机、状态,可以在项目内增删改。
+### 数据集与基准
+在 HuggingFace 上搜索候选数据集（支持中文任务名，如「语义分割」）。  
+**搜索结果默认不入库**——你确认「加入项目」后才会保留；还可关联到具体实验，供后续自主实验选用。主流数据集优先展示。
 
 ### 实验工作台
-新建实验时,在项目目录下生成一个标准的 Python 实验骨架:
+- 左侧管理数据集，右侧管理实验列表  
+- 新建实验自动生成可运行的 Python 项目骨架（uv + Hydra）  
+- 手动运行或一键自主实验（查找基准 → 生成代码 → 自检 → 运行）  
+- 日志实时流式展示，可中途停止；指标自动成曲线，多轮可对比  
+- 运行中的实验在列表与侧栏中清晰标出
 
-```
-experiments/<slug>/
-├── pyproject.toml          依赖(torch>=2.2 等),用 uv 管理
-├── src/train.py            Hydra 入口训练脚本
-├── configs/base.yaml       Hydra 配置
-├── scripts/smoke_test.sh   冒烟测试脚本
-└── runs/                   每次 run 的产物目录
-```
+### 研究助手
+用自然语言完成：研究趋势分析、生成研究想法、检索相关代码仓库、协助起草章节。  
+涉及下载、写文件、执行命令时，会先请你确认，并留下可追溯记录。
 
-Shell Runner 异步执行命令,日志通过 SSE 实时推到前端,可以中途停止。训练脚本里 `print("METRIC step=<n> <name>=<value>")` 格式的输出会被自动解析成指标曲线,多个 run 之间可以在对比表里横向看。每个 run 目录下保存当时的 config、完整 stdout/stderr、`metrics.jsonl` 和 checkpoints。
-
-### LaTeX 写作
-在项目内初始化一个 LaTeX 工程:
-
-```
-writing/
-├── main.tex                主文件,\input 各章节
-├── references.bib          参考文献库
-└── sections/
-    ├── introduction.tex
-    ├── related_work.tex
-    ├── method.tex
-    ├── experiments.tex
-    └── conclusion.tex
-```
-
-前端提供文件树编辑器,可以编辑任意 `.tex` 文件。点编译会用 `latexmk` 生成 PDF 并在页面里预览。本机没装 TeX 时,编译按钮会降级提示,但编辑功能照常可用。引用校验会扫描所有 `.tex` 文件里的 `\cite{key}`,和已下载论文生成的 BibTeX 条目比对,列出缺失的 key 以及每个 key 在哪些文件里被用到了。`writing.draft_section` 技能起草章节时,只用已验证的引用和已完成的实验 run,不会编造参考文献。
+### 论文写作
+一键初始化 LaTeX 工程，内置章节骨架与参考文献库。在线编辑源文件，本机有 TeX 时可编译预览；引用校验帮助发现缺失的 `\cite` 键。
 
 ---
 
-## Tech Stack
+## 设计原则
 
-**后端** (`backend/`)
-
-| 用途 | 选型 |
-| --- | --- |
-| Web 框架 | FastAPI 0.115 + Uvicorn |
-| 数据校验 | Pydantic v2 |
-| ORM / 迁移 | SQLAlchemy 2 + Alembic |
-| 数据库 | SQLite(WAL 模式) |
-| PDF 解析 | PyMuPDF |
-| 模型网关 | LiteLLM(OpenAI / Anthropic / Gemini / DeepSeek / Qwen / Zhipu / Ollama / 任何 OpenAI 兼容端点) |
-| Agent 编排 | LangGraph |
-| 包管理 | uv(Python 3.12) |
-
-**前端** (`frontend/`)
-
-| 用途 | 选型 |
-| --- | --- |
-| 框架 | React 18 + TypeScript 5.5 |
-| 构建 | Vite 5 |
-| 样式 | Tailwind CSS 3.4 |
-| PDF 渲染 | PDF.js 4.5 |
-| 路由 | React Router 6 |
-| 数据层 | TanStack Query 5 + Zustand |
-| Markdown | react-markdown |
-| 图标 | lucide-react |
-
-**工具链** — ruff(后端 lint)、pytest(后端测试)、`tsc --noEmit`(前端类型检查)。
+- **本地优先** — 项目文件、PDF、实验产物与数据库都在本机 `workspace/`  
+- **你说了算** — 下载 PDF、跑训练命令等敏感操作需明确确认  
+- **可追溯** — 关键操作写入审计记录；助手陈述区分证据类型  
+- **优雅降级** — 未配置模型时仍可管理文献与文件；未装 TeX 仍可编辑文稿  
+- **密钥隔离** — API Key 只读环境变量，不进配置文件正文、不入库、不进提示词  
 
 ---
 
-## Prerequisites
+## 快速开始
 
-- **Python 3.12**(uv 会帮你装)
-- **Node.js 18+**
-- **uv**:`curl -LsSf https://astral.sh/uv/install.sh | sh`
-- **(可选)TeX Live** — 仅在用到 LaTeX 编译时需要。macOS:`brew install --cask mactex`。不装也能用写作页编辑源文件,只是编译按钮会降级提示。
+### 环境要求
 
----
+- Python 3.12（由 [uv](https://github.com/astral-sh/uv) 管理）
+- Node.js 18+
+- uv：`curl -LsSf https://astral.sh/uv/install.sh | sh`
+- （可选）TeX Live — 仅编译 PDF 时需要
 
-## Quick Start
+### 安装并启动
 
 ```bash
-# 1. 装依赖(uv 装后端,npm 装前端)
+# 1. 安装依赖
 make install
 
-# 2. 拷配置模板
+# 2. 配置模板
 cp backend/config.example.yaml workspace/.research-agent/config.yaml
 cp backend/.env.example backend/.env
 
-# 3. 编辑 backend/.env,填上你用的模型的 API key,例如:
+# 3. 在 backend/.env 中填入你的模型 API Key，例如：
 #    DEEPSEEK_API_KEY=sk-...
 
-# 4. 起服务(前后端并行,Ctrl+C 一起停)
+# 4. 一键启动前后端（Ctrl+C 同时停止）
 make dev
 ```
 
-打开浏览器:
+打开浏览器访问 **http://localhost:5173**
 
-- 前端 **http://localhost:5173**
-- 后端 API 文档 **http://127.0.0.1:8000/docs**
-
-> 国内网络:`backend/pyproject.toml` 默认走清华 PyPI 镜像,`uv sync` 通常几秒搞定。
+> 国内网络：后端默认使用清华 PyPI 镜像，安装通常很快。
 
 ---
 
-## Configuration
+## 配置说明
 
-两个文件,各管一摊。
+### 模型（`workspace/.research-agent/config.yaml`）
 
-### `workspace/.research-agent/config.yaml`
-
-告诉后端用哪个模型。模板 `backend/config.example.yaml` 里列了所有支持的 provider,取消注释其中一组即可:
+指定对话所用的模型提供方。模板中已列出 OpenAI / Anthropic / Gemini / DeepSeek / 通义 / 智谱 / Ollama 等，取消注释一组即可：
 
 ```yaml
 models:
   default_chat:
-    provider: deepseek          # openai / anthropic / gemini / deepseek / qwen / zhipu / ollama
+    provider: deepseek
     model: deepseek-chat
-    api_key_env: DEEPSEEK_API_KEY   # 指向下面 .env 里的变量名
+    api_key_env: DEEPSEEK_API_KEY   # 对应 .env 中的变量名
 ```
 
-需要本地模型时,用 `provider: openai` + `base_url` 指向 vLLM / LM Studio / Ollama 的 OpenAI 兼容端口,配置示例都在模板里。
+本地模型可使用 OpenAI 兼容接口（vLLM / LM Studio / Ollama），示例见配置模板。
 
-### `backend/.env`
+### 密钥（`backend/.env`）
 
-放 API key。模板 `backend/.env.example` 列了所有 provider 对应的变量名,只填你用的那个就行。
-
-```
+```bash
 DEEPSEEK_API_KEY=sk-...
 ```
 
-**API key 只从环境变量读,不写进 config.yaml,不入数据库,不进 prompt。**
+只填写你实际使用的提供方即可。
 
-### 可选环境变量
+### 可选变量
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
-| `ZSCI_WORKSPACE_PATH` | `./workspace` | 所有项目、PDF、数据库的根目录 |
-| `ZSCI_LLM_CONFIG_PATH` | `<workspace>/.research-agent/config.yaml` | 模型配置文件位置 |
+| `ZSCI_WORKSPACE_PATH` | `./workspace` | 项目与数据根目录 |
+| `ZSCI_LLM_CONFIG_PATH` | `<workspace>/.research-agent/config.yaml` | 模型配置路径 |
+| `ZSCI_HF_ENDPOINT` | 官方 HuggingFace | 数据集检索端点；网络受限时可设为镜像 |
 
 ---
 
-## Project Structure
+## 技术概览
 
-前端跑在 `:5173`,后端跑在 `:8000`,所有持久化数据落在 `workspace/` 下的 SQLite 文件和项目目录里。后端本身无状态,每个项目的文件读写都被限制在 `workspace/projects/<slug>/` 沙箱内,Agent 不会越界碰其它目录。
+| 层级 | 选型 |
+| --- | --- |
+| 后端 | FastAPI · SQLAlchemy · SQLite · LiteLLM · LangGraph · PyMuPDF |
+| 前端 | React 18 · TypeScript · Vite · Tailwind · PDF.js · TanStack Query |
+| 运行 | 本地双进程：UI `:5173` · API `:8000` |
 
-```
-ZSci/
-├── backend/
-│   ├── app/
-│   │   ├── main.py            FastAPI 入口
-│   │   ├── routers/           11 个路由模块(projects / papers / agent / ...)
-│   │   ├── agent/             LangGraph 技能(research / code / writing)
-│   │   ├── db/                SQLAlchemy 模型 + session
-│   │   ├── literature/        OpenAlex / arXiv 检索 + 顶会注册表
-│   │   ├── pdf/               PyMuPDF 解析
-│   │   ├── experiments/       实验骨架生成 + Shell Runner
-│   │   ├── writing/           LaTeX 工程初始化 + 编译 + 引用校验
-│   │   └── workspace/         文件沙箱管理
-│   ├── alembic/               数据库迁移
-│   ├── tests/                 74 个单元测试
-│   └── pyproject.toml
-├── frontend/
-│   ├── src/
-│   │   ├── pages/             路由页面(项目 / 文献库 / 阅读器 / 实验 / 写作 / ...)
-│   │   ├── components/        UI 组件 + PDF.js 包装
-│   │   ├── lib/               API 客户端
-│   │   └── stores/            Zustand
-│   └── package.json
-├── workspace/                 运行时数据(gitignored)
-└── Makefile                   install / dev / test / migrate / lint / clean
-```
+数据落在 `workspace/`（已 gitignore）：SQLite 与各项目沙箱目录。后端无状态，文件读写限制在对应项目路径内。
 
-`workspace/` 在 `.gitignore` 里,首次启动时自动创建。
+更完整的 API 说明见启动后的 **http://127.0.0.1:8000/docs**。
 
 ---
 
-## API Reference
-
-完整 OpenAPI 文档在 `http://127.0.0.1:8000/docs`。下面是按模块的端点速查。
-
-### Projects
-```
-POST   /api/v1/projects                       创建项目
-GET    /api/v1/projects                       列出所有项目
-GET    /api/v1/projects/{id}                  获取单个项目
-PATCH  /api/v1/projects/{id}                  更新项目
-DELETE /api/v1/projects/{id}                  删除项目(含目录)
-```
-
-### Literature & Papers
-```
-POST   /api/v1/projects/{id}/literature/search       检索论文(元数据)
-GET    /api/v1/projects/{id}/papers                  项目内论文列表
-POST   /api/v1/projects/{id}/papers/download         下载并入库 PDF(需确认)
-POST   /api/v1/projects/{id}/papers/import-local     导入本地已有 PDF
-GET    /api/v1/papers/{id}                           论文详情
-GET    /api/v1/papers/{id}/pdf                       PDF 原文件
-POST   /api/v1/papers/{id}/parse                     触发 PyMuPDF 解析
-```
-
-### Notes & Annotations
-```
-POST   /api/v1/papers/{id}/translate                 翻译选段
-GET    /api/v1/papers/{id}/translations              翻译历史
-POST   /api/v1/papers/{id}/reading-note              生成结构化阅读笔记
-GET    /api/v1/papers/{id}/reading-note              读取笔记
-PATCH  /api/v1/papers/{id}/reading-note              编辑笔记
-GET    /api/v1/papers/{id}/annotations               批注列表
-POST   /api/v1/papers/{id}/annotations               新建批注
-PATCH  /api/v1/annotations/{id}                      更新批注
-DELETE /api/v1/annotations/{id}                      删除批注
-```
-
-### Ideas & Repositories
-```
-GET    /api/v1/projects/{id}/ideas                   研究想法列表
-POST   /api/v1/projects/{id}/ideas                   新建想法
-PATCH  /api/v1/ideas/{id}                            更新想法
-DELETE /api/v1/ideas/{id}                            删除想法
-GET    /api/v1/projects/{id}/repositories            代码仓库列表
-PATCH  /api/v1/repositories/{id}                     更新仓库标注
-DELETE /api/v1/repositories/{id}                     删除仓库
-```
-
-### Agent
-```
-GET    /api/v1/agent/skills                          列出可用技能
-POST   /api/v1/projects/{id}/agent/tasks             派发任务
-       task_type ∈ {research.trend_analysis,
-                    research.generate_hypothesis,
-                    code.search_github,
-                    writing.draft_section}
-GET    /api/v1/agent/tasks/{id}                      任务状态
-GET    /api/v1/agent/tasks/{id}/events               事件历史
-GET    /api/v1/agent/tasks/{id}/stream               SSE 实时流
-GET    /api/v1/agent/tasks/{id}/approvals            待审批列表
-POST   /api/v1/agent/tasks/{id}/approve              批准 / 拒绝
-```
-
-### Experiments & Runs
-```
-POST   /api/v1/projects/{id}/experiments             新建实验(生成骨架)
-GET    /api/v1/projects/{id}/experiments             实验列表
-GET    /api/v1/experiments/{id}                      实验详情
-POST   /api/v1/experiments/{id}/runs                 新建 run(需确认命令)
-GET    /api/v1/experiments/{id}/runs                 run 列表
-GET    /api/v1/runs/{id}                             run 状态
-POST   /api/v1/runs/{id}/stop                        停止运行中的 run
-GET    /api/v1/runs/{id}/logs                        完整日志
-GET    /api/v1/runs/{id}/stream                      SSE 实时日志
-GET    /api/v1/runs/{id}/metrics                     指标曲线数据
-```
-
-### Writing
-```
-POST   /api/v1/projects/{id}/writing/init            初始化 LaTeX 工程
-GET    /api/v1/projects/{id}/writing/files           文件树
-GET    /api/v1/projects/{id}/writing/file            读取文件内容
-PUT    /api/v1/projects/{id}/writing/file            写入文件
-POST   /api/v1/projects/{id}/writing/compile         latexmk 编译
-GET    /api/v1/projects/{id}/writing/pdf             下载编译产物
-GET    /api/v1/projects/{id}/writing/citations       引用校验报告
-```
-
-### System
-```
-GET    /api/v1/health                                健康检查
-GET    /api/v1/settings                              工作区 / 模型 / 顶会列表
-```
-
----
-
-## Development
-
-分别启动前后端(各自独立终端):
+## 常用命令
 
 ```bash
-make dev-backend     # uvicorn app.main:app --reload --port 8000
-make dev-frontend    # vite dev server :5173
-```
-
-其它命令:
-
-```bash
-make migrate         # alembic upgrade head(正式迁移路径)
-make lint            # ruff check . + tsc --noEmit
-make clean           # 删 .venv / node_modules / dist
-```
-
-数据库说明:启动时 `Base.metadata.create_all` 会自动建表,所以 `uvicorn` 直接起就能跑;要做 schema 变更时用 Alembic 生成迁移,`make migrate` 应用。
-
----
-
-## Testing
-
-```bash
-make test            # 后端:uv run pytest -q
-```
-
-后端 74 个单元测试,每个用例都跑在独立的临时 workspace + 临时 SQLite 上,互不污染,测完即销。
-
-前端类型检查:
-
-```bash
-cd frontend && npm run build    # tsc -b && vite build
+make dev             # 同时启动前后端
+make dev-backend     # 仅后端
+make dev-frontend    # 仅前端
+make test            # 后端测试
+make lint            # 代码检查
+make migrate         # 数据库迁移
+make clean           # 清理构建产物与依赖目录
 ```
 
 ---
 
-## Roadmap
+## 路线图
 
-- 本地 embedding 检索(把已下载论文做成可 RAG 的小库)
-- 多 run 自动对比报告(不只是曲线,加统计摘要)
-- 实验骨架模板扩展(PyTorch Lightning / JAX)
-- 项目导出 / 协作(打包成一个可分享的 bundle)
-
----
-
-## Security & Constraints
-
-- **文件沙箱** — 所有文件读写限定在 `workspace/projects/<slug>/`,Agent 不会碰外面。
-- **审计留痕** — PDF 下载、写文件、跑 shell 命令都进 `audit_log` 表,可追溯。
-- **审批门** — Agent 不直接执行 shell;跑训练命令必须用户 `confirmed=true`。
-- **Key 隔离** — API key 只从环境变量读,不入库、不进 prompt、不写 config.yaml。
-- **优雅降级** — 模型没配时翻译/笔记/Agent 会给出提示而不是崩溃;LaTeX 没装时写作页降级为纯编辑器。
-- **证据分类** — Agent 产出的陈述强制区分事实 / 推断 / 假设 / 待验证,事实声明必须带来源引用。
+- 本地论文向量检索（项目内 RAG）
+- 多轮实验自动对比报告
+- 更多实验骨架模板（Lightning / JAX 等）
+- 项目打包导出与协作分享
 
 ---
 
-## License
+## 许可
 
 [MIT](LICENSE)
+
+---
+
+<p align="center">
+  <sub>为认真做研究的人而建 · 本地、可控、可复现</sub>
+</p>

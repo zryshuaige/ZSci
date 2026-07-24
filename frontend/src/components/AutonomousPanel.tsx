@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useMutation, useQuery } from "@tanstack/react-query";
-import { api, type AgentEvent } from "@/lib/api";
+import { api, fmtTime, type AgentEvent } from "@/lib/api";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
@@ -110,7 +109,7 @@ export default function AutonomousPanel({ taskId, onReset }: { taskId: string; o
         {events.length === 0 && <div className="text-xs text-muted-foreground">正在连接进度…</div>}
         {events.map((e, i) => (
           <div key={e.id || i} className="text-xs flex gap-2">
-            <span className="text-muted-foreground shrink-0 w-16">{new Date(e.created_at).toLocaleTimeString()}</span>
+            <span className="text-muted-foreground shrink-0 w-28">{fmtTime(e.created_at)}</span>
             <span className={
               e.kind === "warning" ? "text-amber-600" :
               e.kind === "error" ? "text-destructive" :
@@ -124,91 +123,6 @@ export default function AutonomousPanel({ taskId, onReset }: { taskId: string; o
       </div>
       {disconnected && !done && (
         <div className="text-xs text-amber-600">事件流断开,正在重连…</div>
-      )}
-    </Card>
-  );
-}
-
-/** Launch button + panel. Calls POST /experiments/{id}/autonomous, then mounts
- * the streaming panel with the returned task_id.
- *
- * `initialTaskId` lets a caller (e.g. ExperimentsPage's "create + autonomous"
- * flow, or the sidebar deep-link) hand off an already-started task so we don't
- * lose it or start a duplicate.
- *
- * Dedupe + survive-navigation: on mount we check the global active-workflows
- * list for a running autonomous task on THIS experiment. If one exists we
- * attach to it (stream its events) instead of showing the launch button - so
- * navigating away and back never looks like the workflow "exited" and the user
- * can't accidentally start a racing second task. Shares the sidebar's
- * ["workflows","active"] cache (the sidebar drives the polling). */
-export function AutonomousLauncher({
-  expId,
-  initialTaskId,
-}: {
-  expId: string;
-  initialTaskId?: string | null;
-}) {
-  // localTaskId: set from the URL param or when the user clicks launch (so the
-  // panel shows immediately, before the active-workflows poll catches up).
-  const [localTaskId, setLocalTaskId] = useState<string | null>(initialTaskId ?? null);
-  const { data: active, isLoading: checking } = useQuery({
-    queryKey: ["workflows", "active"],
-    queryFn: () => api.listActiveWorkflows(),
-    refetchInterval: false, // the sidebar drives polling; we just read the shared cache
-  });
-  // A currently-running autonomous task for this experiment, if any.
-  const activeTaskId =
-    active?.tasks.find(
-      (t) =>
-        t.task_type === "experiment.autonomous_run" &&
-        t.experiment_id === expId &&
-        ["running", "pending", "awaiting_approval"].includes(t.status),
-    )?.id ?? null;
-  // Prefer the live task; fall back to the local/URL one (e.g. a just-launched
-  // task not yet in the poll, or a completed task whose log we still want to show).
-  const effectiveTaskId = activeTaskId ?? localTaskId;
-
-  const launch = useMutation({
-    mutationFn: () => api.startAutonomous(expId, {}),
-    onSuccess: (r) => setLocalTaskId(r.task_id),
-  });
-
-  if (effectiveTaskId) {
-    return (
-      <AutonomousPanel
-        taskId={effectiveTaskId}
-        onReset={() => setLocalTaskId(null)}
-      />
-    );
-  }
-
-  // While we're still checking for an existing task (and no URL task was given),
-  // don't show the launch button yet - avoids a race where the user could start
-  // a duplicate before the active-task check resolves.
-  if (checking && !initialTaskId) {
-    return (
-      <Card className="p-4 space-y-2">
-        <div className="text-xs text-muted-foreground">检测已有任务…</div>
-      </Card>
-    );
-  }
-
-  return (
-    <Card className="p-4 space-y-2">
-      <div className="flex items-center justify-between">
-        <div>
-          <div className="font-medium text-sm">一键自主实验</div>
-          <div className="text-xs text-muted-foreground">
-            查找基准 → 生成代码 → 自检修复 → 运行 → 对比最优结果
-          </div>
-        </div>
-        <Button onClick={() => launch.mutate()} disabled={launch.isPending}>
-          {launch.isPending ? "启动中…" : "启动自主实验"}
-        </Button>
-      </div>
-      {launch.isError && (
-        <div className="text-xs text-destructive">启动失败:{(launch.error as Error).message}</div>
       )}
     </Card>
   );

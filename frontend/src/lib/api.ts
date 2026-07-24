@@ -2,24 +2,104 @@
 
 const BASE = "/api/v1";
 
+import { FriendlyError, type FriendlyErrorCode } from "./useFriendlyError";
+
+/** Format a backend ISO timestamp into the user's locale.
+ *
+ * The backend now serializes all timestamps with an explicit "Z" suffix
+ * (via `app/utils.iso_utc`), so `new Date(s)` correctly interprets them
+ * as UTC. We keep this helper exported so the page can pass `null` /
+ * missing values through `fmtTime` and get an em-dash instead of "Invalid
+ * Date".
+ */
+export function fmtTime(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleString();
+}
+
+/** Parse a backend error envelope (Phase A: 全局友好错误层).
+ *
+ *  New envelope from app/exception_handlers.py:
+ *    { code: "LLM_NOT_CONFIGURED", user_message: "...", detail?: "...", suggestion?: "..." }
+ *  Old envelope (FastAPI default — still supported as fallback):
+ *    { detail: "..." }
+ *
+ * Returns a FriendlyError on success. Falls back to throwing a
+ * plain Error(detail) when the response isn't JSON-shaped, so older
+ * callers that only inspect `mutation.error.message` keep working.
+ */
+function parseErrorBody(status: number, body: unknown): FriendlyError | Error {
+  // FastAPI's default unhandled-error body is plain text or arbitrary
+  // JSON. The friendly layer always replies with { code, user_message, ... }.
+  if (
+    body !== null &&
+    typeof body === "object" &&
+    "code" in body &&
+    "user_message" in body &&
+    typeof (body as Record<string, unknown>).user_message === "string"
+  ) {
+    const b = body as Record<string, unknown>;
+    return new FriendlyError(
+      {
+        code: (b.code as FriendlyErrorCode) ?? "UNKNOWN",
+        user_message: String(b.user_message ?? "出错了,请稍后重试。"),
+        detail: (b.detail as string | null | undefined) ?? null,
+        suggestion: (b.suggestion as string | null | undefined) ?? null,
+      },
+      status,
+    );
+  }
+  // Fallback: old `{detail: "..."}` shape.
+  let detail = `${status}`;
+  if (body !== null && typeof body === "object" && "detail" in body) {
+    const v = (body as Record<string, unknown>).detail;
+    detail = typeof v === "string" ? v : JSON.stringify(v);
+  } else if (typeof body === "string") {
+    detail = body;
+  }
+  // Make the legacy Error.message still readable in old call sites that
+  // render `(mutation.error as Error).message`.
+  return new Error(detail);
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   // M1: destructure headers out of init so the spread below doesn't overwrite
   // our merged headers. Previously `...init` came after `headers: {...}` and
   // clobbered the Content-Type header when callers passed their own headers.
   const { headers: initHeaders, ...restInit } = init || {};
-  const resp = await fetch(`${BASE}${path}`, {
-    ...restInit,
-    headers: { "Content-Type": "application/json", ...(initHeaders as Record<string, string> | undefined) },
-  });
+  let resp: Response;
+  try {
+    resp = await fetch(`${BASE}${path}`, {
+      ...restInit,
+      headers: { "Content-Type": "application/json", ...(initHeaders as Record<string, string> | undefined) },
+    });
+  } catch (cause: unknown) {
+    // Network failure (DNS / CORS / connection-reset). Surface as a
+    // FriendlyError(NETWORK_ERROR) so the toast component recognises it.
+    throw new FriendlyError(
+      {
+        code: "NETWORK_ERROR",
+        user_message: "网络异常,请检查网络后重试。",
+        detail: cause instanceof Error ? cause.message : String(cause),
+        suggestion: "retry",
+      },
+      undefined,
+    );
+  }
   if (!resp.ok) {
-    let detail = `${resp.status}`;
+    let body: unknown = null;
     try {
-      const body = await resp.json();
-      detail = body.detail || JSON.stringify(body);
+      body = await resp.json();
     } catch {
-      detail = await resp.text().catch(() => detail);
+      try {
+        body = await resp.text();
+      } catch {
+        body = null;
+      }
     }
-    throw new Error(detail);
+    throw parseErrorBody(resp.status, body);
   }
   if (resp.status === 204) return undefined as T;
   return resp.json() as Promise<T>;
@@ -125,6 +205,47 @@ export interface Idea {
   risks_json: string | null;
   created_at: string;
   updated_at: string;
+}
+
+/**
+ * Input shape for POST /projects/{id}/ideas/bulk. Matches backend
+ * `BulkIdeaIn`. NOTE: `content` is a dict (object) here, NOT a pre-serialized
+ * string - the backend json.dumps() it into the TEXT column. Sending a string
+ * here is rejected with INPUT_INVALID (the bug that previously blocked the
+ * Multi-Idea -> experiment handoff).
+ */
+export interface BulkIdeaIn {
+  title?: string | null;
+  hypothesis?: string | null;
+  motivation?: string | null;
+  content?: Record<string, unknown> | null;
+  evidence_json?: unknown[] | null;
+  risks_json?: string[] | null;
+  status?: string;
+}
+
+/** Phase B: Multi-Idea research direction candidate from LLM
+ *  (`research.generate_hypothesis_candidates`). The user picks 0-N of these
+ *  in the comparison view, then the chosen ones are POSTed to /ideas/bulk. */
+export interface MultiIdeaCandidate {
+  name: string;
+  hypothesis: string;
+  motivation: string;
+  /** 25-60 字中文一句话介绍。 */
+  one_liner: string;
+  /** 1-3 ★ 。 */
+  feasibility: number;
+  /** 1-3 ★ 。 */
+  novelty: number;
+  /** "low" | "medium" | "high"。 */
+  est_cost: string;
+  /** 1-10 天。 */
+  est_days: number;
+  recommended: boolean;
+  targets: string[];
+  baseline_methods: string[];
+  key_differences: string[];
+  evidence_paper_ids: string[];
 }
 
 export interface Repository {
@@ -240,6 +361,58 @@ export interface Experiment {
   plan_json: string | null;
   created_at: string;
   updated_at: string;
+  // 9-stage interactive workflow (see app/experiments/states.py). Older
+  // experiments pre-dating the refactor will have `mode='interactive'` +
+  // empty `current_stage` / `overall_status='archived'`.
+  mode: string;
+  overall_status: string;
+  current_stage: string | null;
+  parent_experiment_id: string | null;
+  branch_name: string | null;
+  decision_history_json: string | null;
+}
+
+export interface ExperimentStage {
+  id: string;
+  experiment_id: string;
+  stage_key: string;
+  stage_name_zh: string;
+  description: string;
+  requires_user: boolean;
+  optional_user: boolean;
+  expected_seconds: number;
+  version: number;
+  status: string;
+  inputs_json: Record<string, unknown> | null;
+  outputs_json: Record<string, unknown> | null;
+  artifacts_json: Array<Record<string, unknown>> | null;
+  config_json: Record<string, unknown> | null;
+  user_decisions_json: Array<Record<string, unknown>> | null;
+  dependencies: string[] | null;
+  invalidated_by_stage_id: string | null;
+  started_at: string | null;
+  ended_at: string | null;
+  created_at: string;
+  updated_at: string;
+  /** Populated only when status === "waiting_for_user". */
+  checkpoint_summary: Record<string, unknown> | null;
+}
+
+export interface StageProgress {
+  experiment_id: string;
+  overall_status: string;
+  current_stage: string | null;
+  mode: string;
+  stages: ExperimentStage[];
+  decision_history: Array<Record<string, unknown>>;
+  /** Most-recent friendly error message (for the 失败 banner). */
+  last_error: string | null;
+}
+
+export interface ExperimentUpdate {
+  title?: string;
+  research_question?: string;
+  hypothesis?: string;
 }
 
 export interface Run {
@@ -400,6 +573,45 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+  /**
+   * Phase B: Multi-Ideas 候选对比屏。先把 LLM 选出来让用户挑,挑完再入库。
+   * 后端契约:POST /projects/{projectId}/ideas/bulk, body { ideas: [...] }。
+   */
+  bulkInsertIdeas: (
+    projectId: string,
+    body: { ideas: BulkIdeaIn[] },
+  ) =>
+    request<{ inserted: Idea[]; skipped: number[] }>(
+      `/projects/${projectId}/ideas/bulk`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+  /**
+   * Phase B: 让 LLM 一次性产出 3-5 个差异化候选方向供用户挑选。
+   * 后端契约:POST /projects/{projectId}/agent/tasks task_type=
+   *   "research.generate_hypothesis_candidates"
+   * 入参:{ user_request: string }。
+   * 返回:AgentTask 同步返回,result_json 解析为
+   *   { candidates: Array<MultiIdeaCandidate> }。
+   */
+  generateIdeaCandidates: (
+    projectId: string,
+    userRequest: string,
+  ) =>
+    request<AgentTask>(
+      `/projects/${projectId}/agent/tasks`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          task_type: "research.generate_hypothesis_candidates",
+          input: { user_request: userRequest },
+        }),
+      },
+    ),
+  /** Phase B: 从一个候选方向快速建实验(自动填 RQ + hypothesis, status=draft)。
+   * 后端契约:POST /projects/{projectId}/experiments
+   * 入参:{ title: string; research_question: string; hypothesis: string; ... }。
+   * (此方法也在 Phase 3 段重复定义,留这一份即可,见下方。) */
+
   updateIdea: (id: string, body: Partial<Idea>) =>
     request<Idea>(`/ideas/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   deleteIdea: (id: string) => request<void>(`/ideas/${id}`, { method: "DELETE" }),
@@ -518,18 +730,92 @@ export const api = {
     request<{ ok: boolean }>(`/benchmarks/${benchmarkId}`, { method: "DELETE" }),
   startAutonomous: (
     expId: string,
-    body: { selected_papers?: string[]; selected_repositories?: string[]; run_configs?: string[] }
+    body: { selected_papers?: string[]; selected_repositories?: string[]; run_configs?: string[] },
+    mode: "interactive" | "auto" = "interactive"
   ) =>
-    request<{ task_id: string; experiment_id: string }>(`/experiments/${expId}/autonomous`, {
+    request<{ task_id: string; experiment_id: string; mode: string }>(
+      `/experiments/${expId}/autonomous?mode=${mode}`,
+      {
+        method: "POST",
+        body: JSON.stringify(body),
+      }
+    ),
+  listStages: (expId: string) =>
+    request<StageProgress>(`/experiments/${expId}/stages`),
+  /** PATCH /experiments/{id} — used to fill in research_question before
+   * launching the workflow, or to edit the title. */
+  updateExperiment: (expId: string, body: ExperimentUpdate) =>
+    request<Experiment>(`/experiments/${expId}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  decideStage: (
+    expId: string,
+    body: {
+      decision: "approve" | "edit" | "skip" | "abort";
+      target_stage_id?: string | null;
+      payload?: Record<string, unknown> | null;
+    }
+  ) =>
+    request<{ ok: boolean; decision: string; experiment_id: string; task_id: string | null; fork_experiment_id: string | null }>(
+      `/experiments/${expId}/decide`,
+      { method: "POST", body: JSON.stringify(body) }
+    ),
+  forkExperiment: (
+    expId: string,
+    body: { target_stage_id: string; title?: string | null; branch_name?: string | null }
+  ) =>
+    request<Experiment>(`/experiments/${expId}/fork`, {
       method: "POST",
       body: JSON.stringify(body),
     }),
+  listBranches: (expId: string) =>
+    request<Array<{
+      id: string;
+      experiment_id: string;
+      parent_experiment_id: string | null;
+      parent_branch_id: string | null;
+      fork_stage_id: string | null;
+      fork_stage_key: string | null;
+      branch_name: string;
+      created_at: string;
+    }>>(`/experiments/${expId}/branches`),
   listExperimentFiles: (expId: string) =>
     request<{ files: string[] }>(`/experiments/${expId}/files`),
   getExperimentFile: (expId: string, path: string) =>
     request<{ path: string; content: string }>(
       `/experiments/${expId}/file?path=${encodeURIComponent(path)}`
     ),
+
+  // --- Phase C/D: 研究计划确认 / 结果下一步 ---
+  /** Phase C: 研究计划确认页消费的非技术化预览。
+   * 后端契约:GET /experiments/{exp_id}/preview-plan。 */
+  previewPlan: (expId: string) =>
+    request<{
+      goal: string | null;
+      hypothesis: string | null;
+      scope: string | null;
+      fairness_note: string | null;
+      compute_plan: string | null;
+      risks: string[];
+      metrics: Array<{ name: string; definition?: string | null; aggregation?: string | null }>;
+      est_minutes: number | null;
+      success_means: string | null;
+      failure_means: string | null;
+      has_plan: boolean;
+    } | null>(`/experiments/${expId}/preview-plan`),
+  /** Phase D: 实验结果后续研究方向。
+   * 后端契约:GET /experiments/{exp_id}/next-steps。
+   * 若尚未到 analysis 阶段,返回 has_analysis=false 与空 next_steps。 */
+  nextSteps: (expId: string) =>
+    request<{
+      conclusion: string | null;
+      judgement: string | null;
+      metrics: Record<string, number | string>;
+      risks: string[];
+      next_steps: Array<{ id: string; title: string; description?: string | null; est_cost?: string | null; template?: string | null }>;
+      has_analysis: boolean;
+    } | null>(`/experiments/${expId}/next-steps`),
 
   // --- Phase 4: writing ---
   initWriting: (projectId: string, template: string = "generic", force: boolean = false) =>

@@ -4,26 +4,184 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_serializer
+
+
+# ---------------------------------------------------------------------------
+# M34: naive-datetime serialization fix.
+#
+# SQLite columns store naive `datetime` (no `timezone=True`), so a raw
+# `dt.isoformat()` doesn't tell the browser the value is UTC. JS's
+# `new Date('2026-07-24 08:57:47')` parses that as LOCAL time, which
+# shifts the rendered timestamp by the user's UTC offset (the bug the
+# user reported as "08:57:58" — the actual stored value was
+# `2026-07-24 08:57:47` UTC and the browser was rendering it without
+# conversion).
+#
+# We force every Pydantic model in this app to serialize naive datetimes
+# as ISO-8601 with an explicit 'Z' suffix (Pydantic v2 uses the field's
+# serializer before JSON encoding). All schema classes below should
+# inherit from `ZSciBaseModel` rather than `BaseModel` directly so they
+# pick this up automatically.
+# ---------------------------------------------------------------------------
+
+
+class ZSciBaseModel(BaseModel):
+    """Base model that auto-appends 'Z' to naive datetimes on serialization."""
+
+    @field_serializer("*", when_used="json")
+    def _serialize_datetime(self, value, _info):  # noqa: ANN001
+        # Pydantic only calls this for datetime fields (it's a generic
+        # serializer; other types pass through untouched).
+        if isinstance(value, datetime):
+            return _iso_z(value)
+        return value
+
+
+def _iso_z(dt: datetime) -> str:
+    """ISO-8601 UTC string with explicit 'Z' suffix.
+
+    Naive datetimes are treated as already-UTC (the convention used by
+    `app/utils.iso_utc`); tz-aware datetimes are converted to UTC and
+    the offset is normalised to `+00:00` -> `Z`.
+    """
+    if dt.tzinfo is None:
+        return dt.isoformat(timespec="seconds") + "Z"
+    return dt.astimezone(tz=__import__("datetime").timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+# ---------------------------------------------------------------------------
+# Friendly error envelope (Phase A: 全局友好错误层)
+#
+# FastAPI's exception_handlers (app/exception_handlers.py) returns this shape
+# instead of the default {"detail": "..."}. The frontend's useFriendlyError
+# hook (frontend/src/lib/useFriendlyError.ts) parses it to render a localised
+# toast with an optional CTA (`suggestion`).
+#
+# The wire format is intentionally small: `code` is a stable enum string,
+# `user_message` is localised Chinese, and `suggestion` (optional) names a
+# CTA the UI can render ("go_settings" / "retry" / "check_input"). `detail`
+# carries any extra technical info for a developer debug panel; the regular
+# UI never needs to read it.
+# ---------------------------------------------------------------------------
+
+
+class FriendlyErrorOut(ZSciBaseModel):
+    code: str
+    user_message: str
+    detail: str | None = None
+    suggestion: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Phase C/D preview-plan / next-steps (面向用户的非技术化研究结果视图)
+# ---------------------------------------------------------------------------
+
+
+class PlanPreviewMetricOut(ZSciBaseModel):
+    """一项拟跟踪的指标。"""
+
+    name: str
+    definition: str | None = None
+    aggregation: str | None = None
+
+
+class PlanPreviewOut(ZSciBaseModel):
+    """研究计划确认页用的非技术化视图。
+
+    - 不直接暴露 phase key / 内部 stage 名。
+    - 所有时间/算力均为面向用户的描述,后端在拿到 phase_1_plan.outputs_json
+      之后做一次轻度语义化(把 metrics 列表扁平、把 compute_plan 提炼为
+      算力描述、把 risks 拼成可读句子)。
+    - 若 plan 阶段尚未完成(无 outputs_json),返回时所有字段为 None,
+      前端按"计划待生成"路径渲染,主 CTA 仍可触发首轮验证。
+    """
+
+    goal: str | None = None
+    hypothesis: str | None = None
+    scope: str | None = None  # 来自 run_specs 的非技术化描述
+    fairness_note: str | None = None
+    compute_plan: str | None = None  # 算力与运行规模描述
+    risks: list[str] = []
+    metrics: list[PlanPreviewMetricOut] = []
+    est_minutes: int | None = None  # 估计首轮耗时(分钟),仅参考
+    success_means: str | None = None
+    failure_means: str | None = None
+    has_plan: bool = False  # 标记 phase_1_plan 是否已就绪
+
+
+class NextStepOut(ZSciBaseModel):
+    """研究结果页面的后续研究方向之一。"""
+
+    id: str  # 稳定 id,形如 "step_<n>"
+    title: str  # 一句话方向标题
+    description: str | None = None  # 详细说明
+    est_cost: str | None = None  # 算力描述(low/medium/high 或人类描述)
+    template: str | None = None  # 模板键: iterate / change_dataset / novel / into_writing / branch
+
+
+class NextStepsOut(ZSciBaseModel):
+    """实验结果下一步建议的非技术化视图。
+
+    数据来源:phase_4_report.outputs_json.analysis.{recommendation,next_steps,...}
+    - judgement:基于 recommendation(publish/iterate/inconclusive)映射成
+      continue / adjust / insufficient / pivot。
+    - metrics:从 analysis.best_metric 与 series[*].metrics 抽出关键指标。
+    - conclusion / risks:直接透传 analysis 的自然语言字段。
+    """
+
+    conclusion: str | None = None
+    judgement: str | None = None
+    metrics: dict[str, float | int | str] = {}
+    risks: list[str] = []
+    next_steps: list[NextStepOut] = []
+    has_analysis: bool = False  # 标记 phase_4_report 是否包含 analysis
+
+
+# ---------------------------------------------------------------------------
+# Multi-Ideas (Phase B): bulk insertion endpoint. Lets the candidate-comparison
+# page (ExploreIdeasPage) persist 1-N LLM candidates in a single request,
+# after the user has selected which ones to keep.
+# ---------------------------------------------------------------------------
+
+
+class BulkIdeaIn(ZSciBaseModel):
+    title: str | None = None
+    hypothesis: str | None = None
+    motivation: str | None = None
+    content: dict | None = None
+    evidence_json: list[dict] | None = None
+    risks_json: list[str] | None = None
+    status: str = "backlog"
+
+
+class BulkIdeasPayload(ZSciBaseModel):
+    ideas: list[BulkIdeaIn] = Field(min_length=1, max_length=20)
+
+
+class BulkIdeasOut(ZSciBaseModel):
+    inserted: list[IdeaOut]
+    skipped: list[int] = []
+
 
 # ---------------------------------------------------------------------------
 # Projects
 # ---------------------------------------------------------------------------
 
 
-class ProjectCreate(BaseModel):
+class ProjectCreate(ZSciBaseModel):
     name: str = Field(min_length=1, max_length=200)
     research_direction: str | None = None
     slug: str | None = None  # optional; derived from name if omitted
 
 
-class ProjectUpdate(BaseModel):
+class ProjectUpdate(ZSciBaseModel):
     name: str | None = None
     research_direction: str | None = None
     status: str | None = None
 
 
-class ProjectOut(BaseModel):
+class ProjectOut(ZSciBaseModel):
     id: str
     name: str
     slug: str
@@ -43,7 +201,7 @@ class ProjectOut(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class LiteratureSearchRequest(BaseModel):
+class LiteratureSearchRequest(ZSciBaseModel):
     query: str = Field(min_length=1)
     years: tuple[int, int] | None = None
     venues: list[str] | None = None
@@ -52,7 +210,7 @@ class LiteratureSearchRequest(BaseModel):
     top_venues_only: bool = False
 
 
-class CandidatePaperOut(BaseModel):
+class CandidatePaperOut(ZSciBaseModel):
     paper_id: str
     title: str
     authors: list[str] = Field(default_factory=list)
@@ -71,13 +229,13 @@ class CandidatePaperOut(BaseModel):
     similarity: float | None = None
 
 
-class LiteratureSearchResponse(BaseModel):
+class LiteratureSearchResponse(ZSciBaseModel):
     query: str
     count: int
     papers: list[CandidatePaperOut]
 
 
-class LiteratureRecommendResponse(BaseModel):
+class LiteratureRecommendResponse(ZSciBaseModel):
     """Top-N papers ranked by similarity to the project's interest profile."""
 
     query: str
@@ -90,7 +248,7 @@ class LiteratureRecommendResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class PaperOut(BaseModel):
+class PaperOut(ZSciBaseModel):
     id: str
     project_id: str
     title: str
@@ -113,7 +271,7 @@ class PaperOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
-class DownloadPaperRequest(BaseModel):
+class DownloadPaperRequest(ZSciBaseModel):
     paper_id: str
     title: str
     authors: list[str] = Field(default_factory=list)
@@ -129,7 +287,7 @@ class DownloadPaperRequest(BaseModel):
     confirmed: bool = False  # caller sets True after user approval
 
 
-class ImportLocalPdfRequest(BaseModel):
+class ImportLocalPdfRequest(ZSciBaseModel):
     paper_id: str
     title: str
     authors: list[str] = Field(default_factory=list)
@@ -143,7 +301,7 @@ class ImportLocalPdfRequest(BaseModel):
     confirmed: bool = False  # design.md §16.1: importing a local file needs approval
 
 
-class ParseResponse(BaseModel):
+class ParseResponse(ZSciBaseModel):
     paper_id: str
     pages: int
     parse_status: str
@@ -155,13 +313,13 @@ class ParseResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class TranslateRequest(BaseModel):
+class TranslateRequest(ZSciBaseModel):
     text: str = Field(min_length=1)
     page: int | None = None
     target_lang: str = "中文"
 
 
-class TranslationOut(BaseModel):
+class TranslationOut(ZSciBaseModel):
     id: str
     paper_id: str
     page: int | None
@@ -173,7 +331,7 @@ class TranslationOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
-class ReadingNoteOut(BaseModel):
+class ReadingNoteOut(ZSciBaseModel):
     id: str
     paper_id: str
     kind: str
@@ -186,7 +344,7 @@ class ReadingNoteOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
-class ReadingNoteUpdate(BaseModel):
+class ReadingNoteUpdate(ZSciBaseModel):
     content: str
 
 
@@ -195,7 +353,7 @@ class ReadingNoteUpdate(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class AnnotationCreate(BaseModel):
+class AnnotationCreate(ZSciBaseModel):
     page_number: int | None = None
     selected_text: str | None = None
     rects_json: str | None = None
@@ -204,12 +362,12 @@ class AnnotationCreate(BaseModel):
     kind: str = "highlight"
 
 
-class AnnotationUpdate(BaseModel):
+class AnnotationUpdate(ZSciBaseModel):
     comment: str | None = None
     color: str | None = None
 
 
-class AnnotationOut(BaseModel):
+class AnnotationOut(ZSciBaseModel):
     id: str
     paper_id: str
     page_number: int | None
@@ -229,7 +387,7 @@ class AnnotationOut(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class HealthOut(BaseModel):
+class HealthOut(ZSciBaseModel):
     status: str
     version: str
     workspace: str
@@ -237,7 +395,7 @@ class HealthOut(BaseModel):
     db_error: str | None = None
 
 
-class SettingsOut(BaseModel):
+class SettingsOut(ZSciBaseModel):
     workspace_path: str
     models: dict
     venues: list[str]
@@ -248,7 +406,7 @@ class SettingsOut(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class IdeaCreate(BaseModel):
+class IdeaCreate(ZSciBaseModel):
     title: str | None = None
     hypothesis: str | None = None
     motivation: str | None = None
@@ -256,7 +414,7 @@ class IdeaCreate(BaseModel):
     status: str = "backlog"
 
 
-class IdeaUpdate(BaseModel):
+class IdeaUpdate(ZSciBaseModel):
     title: str | None = None
     hypothesis: str | None = None
     motivation: str | None = None
@@ -264,7 +422,7 @@ class IdeaUpdate(BaseModel):
     status: str | None = None
 
 
-class IdeaOut(BaseModel):
+class IdeaOut(ZSciBaseModel):
     id: str
     project_id: str
     title: str | None
@@ -280,7 +438,7 @@ class IdeaOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
-class RepositoryOut(BaseModel):
+class RepositoryOut(ZSciBaseModel):
     id: str
     project_id: str
     paper_id: str | None
@@ -297,12 +455,12 @@ class RepositoryOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
-class AgentTaskCreate(BaseModel):
+class AgentTaskCreate(ZSciBaseModel):
     task_type: str
     input: dict = Field(default_factory=dict)
 
 
-class AgentTaskStartResponse(BaseModel):
+class AgentTaskStartResponse(ZSciBaseModel):
     """Response for POST /projects/{id}/agent/tasks.
 
     Async (default): only `task_id` + `job_id` are populated; the caller
@@ -314,7 +472,7 @@ class AgentTaskStartResponse(BaseModel):
     task: AgentTaskOut | None = None
 
 
-class AgentTaskOut(BaseModel):
+class AgentTaskOut(ZSciBaseModel):
     id: str
     project_id: str
     task_type: str
@@ -324,24 +482,27 @@ class AgentTaskOut(BaseModel):
     result_json: str | None
     error: str | None
     evidence_ids: str | None
+    # M34: ZSciBaseModel's serializer auto-appends 'Z' to naive datetimes
+    # so the browser parses them as UTC.
     created_at: datetime
     updated_at: datetime
 
     model_config = {"from_attributes": True}
 
 
-class AgentEventOut(BaseModel):
+class AgentEventOut(ZSciBaseModel):
     id: str
     task_id: str
     kind: str
     message: str | None
     payload_json: str | None
+    # M34: see note on AgentTaskOut.created_at.
     created_at: datetime
 
     model_config = {"from_attributes": True}
 
 
-class ApprovalOut(BaseModel):
+class ApprovalOut(ZSciBaseModel):
     id: str
     task_id: str
     action_type: str
@@ -353,7 +514,7 @@ class ApprovalOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
-class ApprovalDecision(BaseModel):
+class ApprovalDecision(ZSciBaseModel):
     approved: bool
 
 
@@ -362,7 +523,7 @@ class ApprovalDecision(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class ActiveWorkflowTaskOut(BaseModel):
+class ActiveWorkflowTaskOut(ZSciBaseModel):
     """An agent task for the global workflow-status sidebar.
 
     `experiment_id` is set only for autonomous experiment tasks (parsed from
@@ -380,13 +541,14 @@ class ActiveWorkflowTaskOut(BaseModel):
     experiment_id: str | None = None
     last_message: str | None = None
     recent: bool = False
+    # M34: ZSciBaseModel's serializer auto-appends 'Z' to naive datetimes.
     created_at: datetime
     updated_at: datetime
 
     model_config = {"from_attributes": True}
 
 
-class ActiveWorkflowRunOut(BaseModel):
+class ActiveWorkflowRunOut(ZSciBaseModel):
     """An in-progress experiment run, for the global workflow-status sidebar."""
 
     run_id: str
@@ -394,18 +556,19 @@ class ActiveWorkflowRunOut(BaseModel):
     project_id: str
     experiment_title: str | None = None
     command: str | None = None
+    # M34: see note on ActiveWorkflowTaskOut.created_at.
     created_at: datetime
 
     model_config = {"from_attributes": True}
 
 
-class ActiveWorkflowsOut(BaseModel):
+class ActiveWorkflowsOut(ZSciBaseModel):
     tasks: list[ActiveWorkflowTaskOut] = Field(default_factory=list)
     runs: list[ActiveWorkflowRunOut] = Field(default_factory=list)
     jobs: list[JobOut] = Field(default_factory=list)
 
 
-class JobOut(BaseModel):
+class JobOut(ZSciBaseModel):
     """A user-triggered long-running operation (literature search, download,
     translation, LaTeX compile, benchmark search, ...). Surfaced in the global
     workflow sidebar so it survives page navigation. `recent` flags the
@@ -422,6 +585,7 @@ class JobOut(BaseModel):
     error: str | None = None
     result_summary: str | None = None
     recent: bool = False
+    # M34: ZSciBaseModel's serializer auto-appends 'Z' to naive datetimes.
     created_at: datetime
     updated_at: datetime
 
@@ -433,7 +597,7 @@ class JobOut(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class RepositoryUpdate(BaseModel):
+class RepositoryUpdate(ZSciBaseModel):
     """Manual correction of a repository's official_status / evidence (M8).
 
     Replaces the previous untyped `dict` body which had no OpenAPI schema and
@@ -448,7 +612,7 @@ class RepositoryUpdate(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class ExperimentCreate(BaseModel):
+class ExperimentCreate(ZSciBaseModel):
     title: str
     research_question: str | None = None
     hypothesis: str | None = None
@@ -456,7 +620,41 @@ class ExperimentCreate(BaseModel):
     source_repository_id: str | None = None
 
 
-class ExperimentOut(BaseModel):
+class PhaseViewItem(ZSciBaseModel):
+    """One entry in the `phase-view` endpoint. Carries the user-facing
+    Chinese label, a one-line summary, and the lucide icon name so the
+    front-end can render a phase cell without consulting a hard-coded
+    table.
+
+    Icon names match lucide-react's exports (e.g. "Target" → `Target`).
+    Front-end unknown icon names fall back to `Circle`.
+    """
+
+    key: str
+    name: str
+    summary: str
+    icon: str
+
+
+class PhaseViewOut(ZSciBaseModel):
+    """Aggregate response for `GET /api/v1/experiments/phase-view`.
+
+    The front-end hydrates from this once per session (cached in
+    localStorage) so it never has a divergent label table from the
+    backend. Each phase key here is one of `STAGE_USER_VIEW`; statuses
+    here are the union of `Experiment.overall_status` (7 values) and
+    `ExperimentStage.status` (12 values), so the front-end can look up
+    either kind of label via the same endpoint.
+    """
+
+    phases: list[PhaseViewItem]
+    # Experiment-level aggregate status (`Experiment.overall_status`).
+    experiment_status_zh: dict[str, str]
+    # Stage-level status (`ExperimentStage.status`).
+    stage_status_zh: dict[str, str]
+
+
+class ExperimentOut(ZSciBaseModel):
     id: str
     project_id: str
     title: str | None
@@ -470,11 +668,22 @@ class ExperimentOut(BaseModel):
     plan_json: str | None
     created_at: datetime
     updated_at: datetime
+    # 9-stage interactive workflow (see app/experiments/states.py). Older
+    # experiments pre-dating the refactor have mode='interactive' and empty
+    # aggregate status. These are optional so legacy / old DB rows still
+    # validate; a server-side default in `_to_out` fills them when the
+    # columns are null.
+    mode: str | None = None
+    overall_status: str | None = None
+    current_stage: str | None = None
+    parent_experiment_id: str | None = None
+    branch_name: str | None = None
+    decision_history_json: str | None = None
 
     model_config = {"from_attributes": True}
 
 
-class RunOut(BaseModel):
+class RunOut(ZSciBaseModel):
     id: str
     experiment_id: str
     run_path: str | None
@@ -490,13 +699,13 @@ class RunOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
-class RunCreate(BaseModel):
+class RunCreate(ZSciBaseModel):
     command: str
     seed: int | None = None
     confirmed: bool = False  # design.md §16.1: running shell needs approval
 
 
-class MetricOut(BaseModel):
+class MetricOut(ZSciBaseModel):
     id: str
     run_id: str
     step: int
@@ -507,7 +716,7 @@ class MetricOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
-class BenchmarkOut(BaseModel):
+class BenchmarkOut(ZSciBaseModel):
     id: str
     project_id: str
     experiment_id: str | None
@@ -565,13 +774,13 @@ class BenchmarkOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
-class BenchmarkSearchRequest(BaseModel):
+class BenchmarkSearchRequest(ZSciBaseModel):
     query: str
     experiment_id: str | None = None
     limit: int = 8
 
 
-class BenchmarkHitOut(BaseModel):
+class BenchmarkHitOut(ZSciBaseModel):
     """Ephemeral HF search hit — not persisted until the user adds it."""
 
     name: str
@@ -607,7 +816,7 @@ class BenchmarkHitOut(BaseModel):
         )
 
 
-class BenchmarkAddRequest(BaseModel):
+class BenchmarkAddRequest(ZSciBaseModel):
     """Persist a search hit (or equivalent fields) into the project library."""
 
     name: str = Field(min_length=1, max_length=300)
@@ -626,11 +835,11 @@ class BenchmarkAddRequest(BaseModel):
     author: str | None = None
 
 
-class BenchmarkUpdate(BaseModel):
+class BenchmarkUpdate(ZSciBaseModel):
     experiment_id: str | None = None
 
 
-class BenchmarkManualCreate(BaseModel):
+class BenchmarkManualCreate(ZSciBaseModel):
     """User-entered benchmark (never-blocked fallback when HF is unreachable)."""
 
     name: str = Field(min_length=1, max_length=300)
@@ -646,7 +855,7 @@ class BenchmarkManualCreate(BaseModel):
     is_mainstream: bool = False
 
 
-class BenchmarkSearchResponse(BaseModel):
+class BenchmarkSearchResponse(ZSciBaseModel):
     """Search-only response: ephemeral hits + source warnings.
 
     `benchmarks` is kept as an alias of `hits` for older clients; prefer `hits`.
@@ -658,12 +867,12 @@ class BenchmarkSearchResponse(BaseModel):
     query_used: list[str] = Field(default_factory=list)
 
 
-class CodegenRequest(BaseModel):
+class CodegenRequest(ZSciBaseModel):
     selected_papers: list[str] = Field(default_factory=list)
     selected_repositories: list[str] = Field(default_factory=list)
 
 
-class CodegenResponse(BaseModel):
+class CodegenResponse(ZSciBaseModel):
     relevant_papers: list[str] = Field(default_factory=list)
     official_code_note: str = ""
     plan: list[dict] = Field(default_factory=list)
@@ -678,7 +887,7 @@ class CodegenResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class DraftSectionRequest(BaseModel):
+class DraftSectionRequest(ZSciBaseModel):
     section_name: str
     citation_keys: list[str] = Field(default_factory=list)
     run_ids: list[str] = Field(default_factory=list)
@@ -690,30 +899,30 @@ class DraftSectionRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class WriteFileRequest(BaseModel):
+class WriteFileRequest(ZSciBaseModel):
     content: str = Field(min_length=0, max_length=1_000_000)
 
 
-class WriteFileResponse(BaseModel):
+class WriteFileResponse(ZSciBaseModel):
     ok: bool
     path: str | None = None
 
 
-class FileContentResponse(BaseModel):
+class FileContentResponse(ZSciBaseModel):
     path: str
     content: str
 
 
-class FileListResponse(BaseModel):
+class FileListResponse(ZSciBaseModel):
     files: list[str]
 
 
-class InitWritingResponse(BaseModel):
+class InitWritingResponse(ZSciBaseModel):
     root: str
     files: list[str]
 
 
-class InitWritingRequest(BaseModel):
+class InitWritingRequest(ZSciBaseModel):
     """Template choice for writing project init. design.md §13.6."""
 
     template: str = "generic"  # generic / ieee / elsevier
@@ -723,18 +932,158 @@ class InitWritingRequest(BaseModel):
     force: bool = False
 
 
-class WritingTemplateOut(BaseModel):
+class WritingTemplateOut(ZSciBaseModel):
     key: str
     label: str
     note: str
 
 
-class WritingTemplatesResponse(BaseModel):
+class WritingTemplatesResponse(ZSciBaseModel):
     templates: list[WritingTemplateOut]
 
 
-class CompileResponse(BaseModel):
+class CompileResponse(ZSciBaseModel):
     ok: bool
     pdf_path: str | None = None
     log: str | None = None
     error: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# 5-phase interactive experiment workflow (see app/experiments/states.py)
+# ---------------------------------------------------------------------------
+
+
+class ExperimentStageOut(ZSciBaseModel):
+    """Single phase snapshot returned by GET /experiments/{id}/stages.
+
+    The front-end StageProgress component reads `stage_key` + `status`
+    for the 5-cell horizontal bar, and `summary` (when waiting_for_user)
+    to render the CheckpointCard.
+    """
+
+    id: str
+    experiment_id: str
+    stage_key: str
+    stage_name_zh: str
+    description: str
+    requires_user: bool
+    optional_user: bool
+    expected_seconds: int
+    version: int
+    status: str
+    inputs_json: dict | None = None
+    outputs_json: dict | None = None
+    artifacts_json: list[dict] | None = None
+    config_json: dict | None = None
+    user_decisions_json: list[dict] | None = None
+    dependencies: list[str] | None = None
+    invalidated_by_stage_id: str | None = None
+    started_at: str | None = None
+    ended_at: str | None = None
+    # M34: ZSciBaseModel's serializer auto-appends 'Z' to naive datetimes.
+    created_at: datetime
+    updated_at: datetime
+    # The current checkpoint summary (markdown + structured fields) so the
+    # front-end can render the CheckpointCard without a second round-trip.
+    # `None` until the stage reaches `waiting_for_user`.
+    checkpoint_summary: dict | None = None
+
+
+class StageProgressOut(ZSciBaseModel):
+    """Aggregated response for GET /experiments/{id}/stages."""
+
+    experiment_id: str
+    overall_status: str
+    current_stage: str | None
+    mode: str
+    stages: list[ExperimentStageOut]
+    decision_history: list[dict] = Field(default_factory=list)
+    # Most-recent error message (or `AgentTask.error`) so the page can
+    # show a friendly Chinese banner when overall_status="failed". Populated
+    # by the router from the latest `kind="error"` AgentTaskEvent if the
+    # task itself doesn't carry an `error` string.
+    last_error: str | None = None
+
+
+class StartInteractiveExperimentRequest(ZSciBaseModel):
+    """Body for POST /experiments/{id}/autonomous (interactive mode).
+
+    `selected_papers` / `selected_repositories` accept FK ids so the
+    orchestrator can grab the relevant context for stage_3_codegen /
+    stage_2_plan.
+    """
+
+    title: str | None = None
+    research_question: str | None = None
+    hypothesis: str | None = None
+    selected_papers: list[str] = Field(default_factory=list)
+    selected_repositories: list[str] = Field(default_factory=list)
+    benchmarks_query: str | None = None
+    run_configs: list[str] = Field(default_factory=lambda: ["baseline"])
+
+
+class ExperimentUpdate(ZSciBaseModel):
+    """Body for PATCH /api/v1/experiments/{exp_id}.
+
+    All fields optional; only provided ones are written. Use this to fill
+    in `research_question` / `hypothesis` after the experiment is created
+    (so the page can let the user draft a new experiment, write the
+    question, then click "启动实验").
+    """
+
+    title: str | None = None
+    research_question: str | None = None
+    hypothesis: str | None = None
+
+
+# --- Checkpoint decisions (only the 4 core buttons; UI simplified) --------
+
+
+class ExperimentStageDecision(ZSciBaseModel):
+    """Body for POST /api/v1/experiments/{exp_id}/decide.
+
+    `decision` is one of the 4 stage decisions surfaced to the user:
+      - approve / edit / skip / abort
+
+    `payload` carries optional fields — e.g. an edited plan for `edit`.
+    The backend resolves the owning AgentTask + pending Approval from the
+    experiment's `current_stage` and the AgentTask's `checkpoint_payload`.
+    """
+
+    decision: Literal["approve", "edit", "skip", "abort"]
+    target_stage_id: str | None = None
+    payload: dict | None = None
+
+
+class ExperimentStageDecisionOut(ZSciBaseModel):
+    """Response for POST /decide."""
+
+    ok: bool
+    decision: str
+    experiment_id: str
+    task_id: str | None = None
+    # Kept for backward-compat (the legacy fork endpoint wrote here).
+    # Always None now; fork is intentionally not exposed in the UI.
+    fork_experiment_id: str | None = None
+
+
+class BranchOut(ZSciBaseModel):
+    """A fork relationship row (experiment_branches)."""
+
+    id: str
+    experiment_id: str
+    parent_experiment_id: str | None
+    parent_branch_id: str | None
+    fork_stage_id: str | None
+    fork_stage_key: str | None
+    branch_name: str
+    created_at: str
+
+
+class ForkRequest(ZSciBaseModel):
+    """Body for POST /api/v1/experiments/{exp_id}/fork (direct, non-decide path)."""
+
+    target_stage_id: str
+    title: str | None = None
+    branch_name: str | None = None

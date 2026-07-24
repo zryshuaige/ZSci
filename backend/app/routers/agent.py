@@ -47,6 +47,7 @@ from app.schemas import (
     ApprovalOut,
     JobOut,
 )
+from app.utils import iso_utc
 
 router = APIRouter(tags=["agent"])
 logger = logging.getLogger("zsci.router.agent")
@@ -127,6 +128,8 @@ def list_active_workflows(db: Session = Depends(get_db)) -> ActiveWorkflowsOut:
                 experiment_id=exp_id,
                 last_message=last_msg.get(t.id),
                 recent=t.id not in active_ids,
+                # M34: ZSciBaseModel's serializer auto-appends 'Z' to naive
+                # datetimes on JSON output.
                 created_at=t.created_at,
                 updated_at=t.updated_at,
             )
@@ -146,6 +149,7 @@ def list_active_workflows(db: Session = Depends(get_db)) -> ActiveWorkflowsOut:
             project_id=pid,
             experiment_title=title,
             command=r.command,
+            # M34: see note on ActiveWorkflowTaskOut.created_at.
             created_at=r.created_at,
         )
         for r, pid, title in rows
@@ -170,6 +174,7 @@ def list_active_workflows(db: Session = Depends(get_db)) -> ActiveWorkflowsOut:
             error=j.error,
             result_summary=j.result_summary,
             recent=j.id not in active_job_ids,
+            # M34: ZSciBaseModel auto-serializes naive datetimes with 'Z'.
             created_at=j.created_at,
             updated_at=j.updated_at,
         )
@@ -249,6 +254,9 @@ def create_and_run_task(
         logger.exception("agent task %s failed unexpectedly", payload.task_type)
         finish_job_in_fresh_session(job_id, status="failed", error=str(exc))
         raise HTTPException(500, f"Agent task failed: {exc}") from exc
+    # M34: ZSciBaseModel's serializer auto-appends 'Z' to naive datetimes
+    # in the JSON output (see schemas.py). No manual `iso_utc` wrapping
+    # required here.
     return AgentTaskOut.model_validate(task)
 
 
@@ -337,6 +345,7 @@ def get_task(task_id: str, db: Session = Depends(get_db)) -> AgentTaskOut:
     task = db.get(AgentTask, task_id)
     if task is None:
         raise HTTPException(404, "Task not found")
+    # M34: ZSciBaseModel auto-appends 'Z' to naive datetimes on JSON output.
     return AgentTaskOut.model_validate(task)
 
 
@@ -345,6 +354,7 @@ def list_events(task_id: str, db: Session = Depends(get_db)) -> list[AgentEventO
     task = db.get(AgentTask, task_id)
     if task is None:
         raise HTTPException(404, "Task not found")
+    # M34: ZSciBaseModel auto-appends 'Z' to naive datetimes on JSON output.
     return [AgentEventOut.model_validate(e) for e in task.events]
 
 
@@ -379,7 +389,7 @@ async def stream_events(task_id: str, request: Request, db: Session = Depends(ge
                             "id": e.id,
                             "kind": e.kind,
                             "message": e.message,
-                            "created_at": e.created_at.isoformat(),
+                            "created_at": iso_utc(e.created_at),
                         },
                         ensure_ascii=False,
                     )

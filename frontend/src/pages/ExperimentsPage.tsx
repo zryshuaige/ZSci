@@ -95,8 +95,13 @@ export default function ExperimentsPage() {
     const idea = ideas.find((i) => i.id === ideaId);
     if (!idea) return;
     setTitle(idea.title || title);
-    setHyp(idea.hypothesis || hyp);
-    setRq(idea.motivation || rq);
+    // Align with ExploreIdeasPage: research_question comes from
+    // hypothesis (one-liner form), hypothesis/motivation are the longer
+    // rationale. This used to be inverted (rq=idea.motivation,
+    // hyp=idea.hypothesis), which produced empty RQ + populated
+    // hypothesis for many ideas.
+    setRq(idea.hypothesis || rq);
+    setHyp(idea.motivation || hyp);
     setRelatedIdeaId(idea.id);
   };
 
@@ -207,6 +212,15 @@ export default function ExperimentsPage() {
               <Sparkles className="h-3.5 w-3.5 text-amber-500" />
               创建后启动自主实验助手（查找基准 → 生成代码 → 自检 → 运行）
             </label>
+            {/* When "创建并启动" is checked, RQ is required (the backend
+                returns 422 if it's empty). The button below is gated on
+                this; we surface the reason inline so the user knows why
+                it's disabled. */}
+            {autonomous && !rq.trim() && (
+              <div className="text-xs text-amber-700">
+                请先填写研究问题,再勾选「创建并启动」。
+              </div>
+            )}
             <div className="text-xs text-muted-foreground">
               将在本地为该实验创建独立的可运行项目目录。
             </div>
@@ -214,7 +228,12 @@ export default function ExperimentsPage() {
         }
         confirmLabel={autonomous ? "创建并启动" : "创建"}
         onCancel={() => { setCreating(false); setAutonomous(false); }}
-        onConfirm={() => title.trim() && createMutation.mutate()}
+        onConfirm={() => {
+          // Confirm needs a title; if "创建并启动" is checked we also need RQ.
+          if (!title.trim()) return;
+          if (autonomous && !rq.trim()) return;
+          createMutation.mutate();
+        }}
       />
     </div>
   );

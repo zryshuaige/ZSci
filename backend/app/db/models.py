@@ -220,6 +220,14 @@ class AgentTask(Base):
     result_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     evidence_ids: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON list
+    # --- 9-stage interactive workflow (see app/experiments/states.py) ---
+    # `stage_key` lets the front-end identify which stage's checkpoint is
+    # pending via the existing `/workflows/active` SSE stream without
+    # joining experiment_stages. `checkpoint_payload_json` is the cached
+    # summary that the orchestrator wrote when calling request_approval,
+    # so the UI can render the checkpoint card without another round-trip.
+    stage_key: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    checkpoint_payload_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now, index=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
 
@@ -272,7 +280,16 @@ class AgentTaskEvent(Base):
 
 
 class Experiment(Base):
-    """An experiment in a project. design.md §9.6, §14.1."""
+    """An experiment in a project. design.md §9.6, §14.1.
+
+    The 9-stage interactive workflow (see app/experiments/states.py) writes
+    each stage's snapshot to `experiment_stages`. The `status` field is kept
+    for backward compatibility with the legacy 5-stage linear pipeline —
+    newer code reads `overall_status` instead, which is the aggregated
+    state across all stages (draft / running / paused / waiting_user /
+    completed / failed / archived). `current_stage` is the most recently
+    active stage_key (cached for the front-end's quick lookup).
+    """
 
     __tablename__ = "experiments"
 
@@ -289,16 +306,39 @@ class Experiment(Base):
     related_idea_id: Mapped[str | None] = mapped_column(
         ForeignKey("ideas.id", ondelete="SET NULL"), nullable=True
     )
+    # Legacy linear status — kept for back-compat reads; new code should
+    # consult `overall_status` + experiment_stages rows.
     status: Mapped[str] = mapped_column(String, default="planned")
     # planned / scaffolded / running / done / failed
     plan_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     research_question: Mapped[str | None] = mapped_column(Text, nullable=True)
     hypothesis: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # --- 9-stage interactive workflow (see app/experiments/states.py) ---
+    mode: Mapped[str] = mapped_column(String, default="interactive")
+    # interactive | auto (legacy 5-stage linear)
+    overall_status: Mapped[str] = mapped_column(String, default="draft")
+    # draft / running / paused / waiting_user / completed / failed / archived
+    current_stage: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    parent_experiment_id: Mapped[str | None] = mapped_column(
+        ForeignKey("experiments.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    branch_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    decision_history_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
 
     runs: Mapped[list["ExperimentRun"]] = relationship(
         back_populates="experiment", cascade="all, delete-orphan"
+    )
+    stages: Mapped[list["ExperimentStage"]] = relationship(
+        back_populates="experiment",
+        cascade="all, delete-orphan",
+        order_by="ExperimentStage.stage_key",
+    )
+    branches: Mapped[list["ExperimentBranch"]] = relationship(
+        back_populates="experiment",
+        cascade="all, delete-orphan",
+        foreign_keys="ExperimentBranch.experiment_id",
     )
 
 
@@ -413,3 +453,93 @@ class Job(Base):
     result_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now, index=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
+
+
+# ---------------------------------------------------------------------------
+# 9-stage interactive experiment workflow (see app/experiments/states.py)
+# ---------------------------------------------------------------------------
+
+
+class ExperimentStage(Base):
+    """A single stage's snapshot in the 9-stage interactive workflow.
+
+    The `stage_key` follows the convention `stage_<index>_<short>`, e.g.
+    `stage_0_init`, `stage_1_benchmarks`, `stage_2_plan`, ...
+
+    Each row is a (version, status) pair — when a stage is re-run, a new
+    row is created with a bumped `version` instead of mutating in place,
+    so the history of edits is preserved per `agent_tasks` audit.
+
+    `status` is the source of truth for the state machine; `overall_status`
+    on the parent Experiment is the aggregate.
+
+    `invalidated_by_stage_id` is non-null when a downstream stage's inputs
+    no longer match the upstream ones (e.g. user edited stage_3 codegen,
+    which marked stage_4..8 as `outdated`).
+    """
+
+    __tablename__ = "experiment_stages"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    experiment_id: Mapped[str] = mapped_column(
+        ForeignKey("experiments.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    stage_key: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    status: Mapped[str] = mapped_column(String, default="not_started")
+    # not_started / draft / waiting_for_user / approved / running /
+    # paused / completed / failed / needs_revision / skipped / outdated / archived
+    inputs_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    outputs_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    artifacts_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    config_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    logs_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    user_decisions_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    dependencies: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # JSON list of upstream stage_keys; the orchestrator uses this to
+    # mark downstream stages as `outdated` when an upstream is re-run.
+    invalidated_by_stage_id: Mapped[str | None] = mapped_column(
+        ForeignKey("experiment_stages.id", ondelete="SET NULL"), nullable=True
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
+
+    experiment: Mapped[Experiment] = relationship(back_populates="stages")
+
+
+class ExperimentBranch(Base):
+    """A fork of an experiment at a specific stage.
+
+    One row per branch. The current experiment's `parent_experiment_id` is
+    the parent in the branch graph; `fork_stage_id` is the stage at which
+    the fork happened (the new experiment starts re-running from that
+    stage). `parent_branch_id` allows chains of forks.
+
+    Like git's branch model — `branch_name` is human-readable (e.g.
+    "ablation-no-aug"); the parent_id gives the immutable graph.
+    """
+
+    __tablename__ = "experiment_branches"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    experiment_id: Mapped[str] = mapped_column(
+        ForeignKey("experiments.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    parent_experiment_id: Mapped[str | None] = mapped_column(
+        ForeignKey("experiments.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    parent_branch_id: Mapped[str | None] = mapped_column(
+        ForeignKey("experiment_branches.id", ondelete="SET NULL"), nullable=True
+    )
+    fork_stage_id: Mapped[str | None] = mapped_column(
+        ForeignKey("experiment_stages.id", ondelete="SET NULL"), nullable=True
+    )
+    branch_name: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+
+    experiment: Mapped[Experiment] = relationship(
+        back_populates="branches",
+        foreign_keys=[experiment_id],
+    )

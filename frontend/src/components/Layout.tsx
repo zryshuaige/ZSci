@@ -3,6 +3,7 @@ import { Link, Outlet, useLocation } from "react-router-dom";
 import { FlaskConical, Settings, PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { Tooltip } from "@/components/ui/Tooltip";
+import { ErrorToastHost } from "@/components/ui/ErrorToast";
 import WorkflowStatus from "./WorkflowStatus";
 import BackendHealthBanner from "./BackendHealthBanner";
 
@@ -85,6 +86,11 @@ export default function Layout() {
         <div key={location.pathname} className="flex-1 min-h-0 animate-fade-in">
           <Outlet />
         </div>
+        {/* Phase A: global friendly-error toast host. Listens to the
+            showFriendlyError queue from useFriendlyError.ts. Mounted once
+            here so every page automatically gets toasts when its mutations
+            call showFriendlyError. */}
+        <ErrorToastHost />
       </main>
     </div>
   );

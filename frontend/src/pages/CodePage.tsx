@@ -8,6 +8,7 @@ import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { ConfirmDialog, Spinner } from "@/components/ui/Dialog";
 import { EmptyState } from "@/components/ui/EmptyState";
+import { showFriendlyError } from "@/lib/useFriendlyError";
 
 const STATUS_COLORS: Record<string, string> = {
   official: "bg-green-100 text-green-800",
@@ -40,6 +41,7 @@ export default function CodePage() {
         selected_papers: selectedPaper ? [selectedPaper] : downloaded.map((p) => p.id),
       }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["repos", project.id] }),
+    onError: (err) => showFriendlyError(err),
   });
 
   const delMutation = useMutation({
@@ -80,11 +82,6 @@ export default function CodePage() {
             {searchMutation.isPending ? "检索中…" : "检索代码"}
           </Button>
         </div>
-        {searchMutation.isError && (
-          <div className="text-sm text-destructive">
-            检索失败:{(searchMutation.error as Error).message}
-          </div>
-        )}
       </Card>
 
       {searchMutation.isPending && <Spinner />}

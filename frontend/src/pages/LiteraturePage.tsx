@@ -3,6 +3,7 @@ import { Link, useOutletContext } from "react-router-dom";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Search, Download, FileText, ExternalLink, Sparkles } from "lucide-react";
 import { api, type CandidatePaper, type Project } from "@/lib/api";
+import { showFriendlyError } from "@/lib/useFriendlyError";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { Badge } from "@/components/ui/Badge";
@@ -27,6 +28,7 @@ export default function LiteraturePage() {
         top_venues_only: topOnly,
       }),
     onSuccess: (data) => setResults(data.papers),
+    onError: (err) => showFriendlyError(err),
   });
 
   // Recommendations: rank the literature pool by TF-IDF similarity to the
@@ -34,11 +36,13 @@ export default function LiteraturePage() {
   const recommendMutation = useMutation({
     mutationFn: () => api.recommendLiterature(project.id),
     onSuccess: (data) => setRecommendations(data.papers),
+    onError: (err) => showFriendlyError(err),
   });
 
   const downloadMutation = useMutation({
     mutationFn: (c: CandidatePaper) =>
       api.downloadPaper(project.id, { ...c, confirmed: true }),
+    onError: (err) => showFriendlyError(err),
     onSuccess: (_data, candidate) => {
       // H3: use the candidate from the mutation variable instead of the stale
       // `pending` closure from render time.
@@ -95,12 +99,6 @@ export default function LiteraturePage() {
         </p>
       </Card>
 
-      {recommendMutation.isError && (
-        <div className="text-sm text-destructive">
-          推荐失败:{(recommendMutation.error as Error).message}
-        </div>
-      )}
-
       {recommendations.length > 0 && (
         <div className="space-y-2">
           <div className="flex items-center gap-2">
@@ -120,11 +118,6 @@ export default function LiteraturePage() {
       )}
 
       {searchMutation.isPending && <Spinner />}
-      {searchMutation.isError && (
-        <div className="text-sm text-destructive">
-          搜索失败:{(searchMutation.error as Error).message}
-        </div>
-      )}
 
       <div className="space-y-2">
         {results.map((c) => (

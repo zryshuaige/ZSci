@@ -40,7 +40,7 @@ def test_active_workflows_lists_running_task_with_experiment_id(client, project,
 
     exp = client.post(
         f"/api/v1/projects/{project['id']}/experiments",
-        json={"title": "Auto Exp"},
+        json={"title": "Auto Exp", "research_question": "does X work?"},
     ).json()
 
     task = AgentTask(
@@ -115,7 +115,7 @@ def test_active_workflows_lists_running_run(client, project, db_session):
 
     exp = client.post(
         f"/api/v1/projects/{project['id']}/experiments",
-        json={"title": "Run Exp"},
+        json={"title": "Run Exp", "research_question": "does X work?"},
     ).json()
 
     run = ExperimentRun(
