@@ -401,6 +401,53 @@ class SettingsOut(ZSciBaseModel):
     venues: list[str]
 
 
+class LLMProviderPresetOut(ZSciBaseModel):
+    """A selectable provider template shown in the settings dropdown."""
+
+    id: str
+    name_zh: str
+    provider: str
+    model: str
+    base_url: str | None = None
+    api_key_env: str | None = None
+    needs_key: bool = True
+    key_hint: str = ""
+
+
+class LLMCurrentConfigOut(ZSciBaseModel):
+    """The currently-applied default_chat config (no key value)."""
+
+    provider: str | None = None
+    model: str | None = None
+    base_url: str | None = None
+    api_key_env: str | None = None
+    api_key_set: bool = False
+    matched_preset_id: str | None = None
+
+
+class LLMConfigOut(ZSciBaseModel):
+    """GET /llm/config response: the catalog + the current selection."""
+
+    presets: list[LLMProviderPresetOut]
+    current: LLMCurrentConfigOut
+
+
+class LLMConfigUpdate(ZSciBaseModel):
+    """PUT /llm/config body.
+
+    `provider_id` selects a preset (carries provider/model/base_url/api_key_env
+    defaults). `model` / `base_url` optionally override the preset's defaults
+    (base_url="" clears it). `api_key` is written to .env under the preset's
+    api_key_env; omit or leave blank to keep any existing key untouched (the
+    field is masked in the UI, so blank means "don't change").
+    """
+
+    provider_id: str
+    model: str | None = None
+    base_url: str | None = None
+    api_key: str | None = None
+
+
 # ---------------------------------------------------------------------------
 # Phase 2: ideas, repositories, agent tasks, approvals
 # ---------------------------------------------------------------------------

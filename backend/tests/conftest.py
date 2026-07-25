@@ -20,6 +20,12 @@ def isolated_workspace(tmp_path, monkeypatch):
     monkeypatch.setenv("ZSCI_WORKSPACE_PATH", str(ws))
     monkeypatch.delenv("ZSCI_LLM_CONFIG_PATH", raising=False)
 
+    # Redirect the API-key .env to a temp file so tests NEVER read or write
+    # the real backend/.env. resolve_api_key / config_io.save_api_key both
+    # honor ZSCI_ENV_FILE (see app.config.env_file_path). Without this, a test
+    # that saved a key would corrupt the developer's real .env.
+    monkeypatch.setenv("ZSCI_ENV_FILE", str(tmp_path / "test.env"))
+
     # Reset cached singletons so they pick up the new env.
     from app import config as config_module
     config_module.get_settings.cache_clear()

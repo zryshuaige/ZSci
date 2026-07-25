@@ -63,15 +63,22 @@ class Gateway:
         return role in self._config.models
 
     def describe(self) -> dict:
-        """Safe description of configured providers (no keys)."""
+        """Safe description of configured providers (no keys).
+
+        Exposes whether the `default_chat` role's API key env var is currently
+        resolvable (`api_key_set`) so the settings UI can render a
+        "已配置 / 未配置 Key" badge. Never includes the key value itself.
+        """
+        from app.llm.providers import is_api_key_set
+
+        dc = self._config.default_chat
         return {
             "configured_roles": sorted(self._config.models.keys()),
-            "default_chat_model": (
-                self._config.default_chat.model if self._config.default_chat else None
-            ),
-            "default_chat_provider": (
-                self._config.default_chat.provider if self._config.default_chat else None
-            ),
+            "default_chat_model": dc.model if dc else None,
+            "default_chat_provider": dc.provider if dc else None,
+            "default_chat_base_url": dc.base_url if dc else None,
+            "default_chat_api_key_env": dc.api_key_env if dc else None,
+            "default_chat_api_key_set": is_api_key_set(dc) if dc else False,
         }
 
     def chat(

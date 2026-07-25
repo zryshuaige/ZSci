@@ -127,8 +127,40 @@ def load_llm_config(path: Path | None) -> ModelGatewayConfig:
     return ModelGatewayConfig(models=models)
 
 
+def env_file_path() -> Path:
+    """Path to the ``.env`` file holding provider API keys.
+
+    Defaults to ``backend/.env`` (the file pydantic-settings reads for ZSCI_
+    app settings). Overridable via the ``ZSCI_ENV_FILE`` env var so tests can
+    redirect key reads/writes to a temp file and never touch the real
+    ``backend/.env``.
+    """
+    override = os.environ.get("ZSCI_ENV_FILE")
+    if override:
+        return Path(override)
+    return BACKEND_ROOT / ".env"
+
+
 def resolve_api_key(provider: ProviderConfig) -> str | None:
-    """Resolve a provider's API key from the environment, never from disk/DB."""
+    """Resolve a provider's API key.
+
+    Checks ``os.environ`` first (keys the user exported in their shell), then
+    falls back to reading ``backend/.env`` directly via ``dotenv_values``.
+
+    The fallback is what makes keys stored in ``.env`` actually work: pydantic-
+    settings reads ``.env`` to populate its own ZSCI_ fields but does NOT inject
+    the provider key vars (SILICONFLOW_API_KEY, etc.) into ``os.environ`` - so
+    without this fallback every key in ``.env`` was dead weight and this
+    function always returned None. Reading the file here (rather than calling
+    ``load_dotenv`` at startup) keeps keys OUT of ``os.environ`` so they aren't
+    inherited by user-run experiment subprocesses (M30). The file is tiny and
+    read fresh per call, so a saved key takes effect immediately.
+    """
     if provider.api_key_env is None:
         return None
-    return os.environ.get(provider.api_key_env)
+    val = os.environ.get(provider.api_key_env)
+    if val:
+        return val
+    from dotenv import dotenv_values
+
+    return dotenv_values(env_file_path()).get(provider.api_key_env)

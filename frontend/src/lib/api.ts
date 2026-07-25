@@ -415,6 +415,43 @@ export interface ExperimentUpdate {
   hypothesis?: string;
 }
 
+// --- LLM provider settings (mirrors backend schemas.py LLM*) ---
+
+export interface LLMProviderPreset {
+  id: string;
+  name_zh: string;
+  provider: string;
+  model: string;
+  base_url: string | null;
+  api_key_env: string | null;
+  needs_key: boolean;
+  key_hint: string;
+}
+
+export interface LLMCurrentConfig {
+  provider: string | null;
+  model: string | null;
+  base_url: string | null;
+  api_key_env: string | null;
+  api_key_set: boolean;
+  matched_preset_id: string | null;
+}
+
+export interface LLMConfig {
+  presets: LLMProviderPreset[];
+  current: LLMCurrentConfig;
+}
+
+export interface LLMConfigUpdate {
+  provider_id: string;
+  /** Override the preset's default model. */
+  model?: string;
+  /** Override the preset's base_url. Empty string clears it. */
+  base_url?: string;
+  /** The API key to persist. Omit/blank to keep any existing key. */
+  api_key?: string;
+}
+
 export interface Run {
   id: string;
   experiment_id: string;
@@ -564,6 +601,14 @@ export const api = {
     request<{ status: string; version: string; workspace: string; db_ok?: boolean; db_error?: string | null }>("/health"),
   getSettings: () =>
     request<{ workspace_path: string; models: any; venues: string[] }>("/settings"),
+
+  // --- LLM provider settings (Settings page model-gateway editor) ---
+  getLLMConfig: () => request<LLMConfig>("/llm/config"),
+  saveLLMConfig: (body: LLMConfigUpdate) =>
+    request<LLMCurrentConfig>("/llm/config", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
 
   // --- Phase 2: ideas ---
   listIdeas: (projectId: string) =>
