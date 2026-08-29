@@ -1,108 +1,92 @@
 /**
- * ExperimentDetailPage — Iteration 4 UX overhaul.
+ * ExperimentDetailPage — the autonomous experiment's home.
  *
  * Layout (top to bottom):
+ *   1. Header: breadcrumb + title + unified StatusBadge.
+ *   2. FivePhaseStepper — the 5 phases at a glance.
+ *   3. CurrentStageHero — variant per overall_status:
+ *      draft / running / waiting_user / completed / failed / paused.
+ *   4. Live agent log (AutonomousPanel) — shown whenever a task is known:
+ *      launched from this page, restored from the ?task= deep link, or
+ *      rediscovered via the shared /workflows/active feed. This is what
+ *      makes "the agent is alive" visible across reloads and navigation.
+ *   5. Advanced drawer — research question editor, decision history,
+ *      manual runs + run log stream + metrics.
+ *   6. StickyActionBar — semantic actions only; every button is wired.
  *
- *   1. Sticky top area: project breadcrumb + experiment title + status badge.
- *   2. FivePhaseStepper — always renders 5 cells (no hidden future phases).
- *   3. CurrentStageHero — switches variant based on overall_status:
- *        - draft:         "启动实验" CTA
- *        - running:       "AI 正在…" with stage name + summary
- *        - waiting_user:  inline CheckpointCard + 确认/调整 actions
- *        - completed:     headline + 核心结果 + 查看结论 CTA
- *        - failed:        friendly "实验暂时停下来了" banner + 自动修复 CTA
- *   4. StageSummaryRow — collapsible details (already-confirmed items,
- *      risks, recent events). Defaults to collapsed.
- *   5. Advanced drawer — research_question editor + 运行记录 + 对比图,
- *      only visible when the user clicks "查看研究详情".
- *   6. StickyActionBar — fixed bottom 64px with 1 primary + 2 secondary
- *      CTAs appropriate for the current variant.
- *
- * Iteration 4 changes (vs. the previous 11-card vertical stack):
- *
- *   - No more internal IDs (phase_xxx / stage_xxx / waitingforuser /
- *     checkpoint) — every label flows through `usePhaseView()` which
- *     hydrates from /api/v1/experiments/phase-view.
- *   - Hypothesis removed from the main flow; lives only in the
- *     advanced drawer.
- *   - Dropped `useStuckDuration` — the 2-min amber warning card is
- *     gone. The backend heartbeat + 30-min reaper threshold handle
- *     false-interruptions without UI noise.
- *   - Decide mutation now does optimistic UI: the moment the user
- *     clicks 确认/调整/跳过, the stage row flips to the new status
- *     locally; if the server rejects, the previous snapshot is
- *     restored.
- *   - All `(mutation.error as Error).message` strings routed through
- *     `showFriendlyError` so the user sees a toast with code +
- *     user_message + suggestion, never raw exception text.
+ * Data flow: stage polling runs ONLY while the workflow is actually
+ * running (2s) — terminal/paused/waiting states don't poll; mutations
+ * invalidate explicitly. The decide mutation does optimistic update with
+ * rollback.
  */
 
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useNavigate, useParams } from "react-router-dom";
-import { Play, Square, ChevronDown, ChevronRight, ArrowRight } from "lucide-react";
-import { api, fmtTime, type Metric, type Run, type Experiment, type StageProgress as StageProgressData } from "@/lib/api";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { Play, Square, ChevronDown, ChevronRight, ArrowRight, AlertTriangle, RotateCw } from "@/components/ui/icons";
+import { api, fmtTime, qk, type Metric, type Run, type StageProgress as StageProgressData, type ExperimentStage } from "@/api";
 import { showFriendlyError } from "@/lib/useFriendlyError";
-import { runStatusLabel } from "@/lib/labels";
+import { useActiveWorkflows, findTaskForExperiment } from "@/lib/hooks/useActiveWorkflows";
+import { useEventSource } from "@/lib/hooks/useEventSource";
+import { StatusBadge } from "@/components/ui/StatusBadge";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
-import { Badge } from "@/components/ui/Badge";
 import { Input, Textarea } from "@/components/ui/Input";
 import { ConfirmDialog, Spinner } from "@/components/ui/Dialog";
 import { MetricChart, CompareChart } from "@/components/charts/MetricChart";
 import AutonomousPanel from "@/components/AutonomousPanel";
 import { FivePhaseStepper } from "@/components/experiment/FivePhaseStepper";
 import { CurrentStageHero } from "@/components/experiment/CurrentStageHero";
-import { StageSummaryRow } from "@/components/experiment/StageSummaryRow";
-import { StickyActionBar } from "@/components/experiment/StickyActionBar";
+import { StickyActionBar, type ActionKey } from "@/components/experiment/StickyActionBar";
 import { DecisionHistory } from "@/components/experiment/DecisionHistory";
-import {
-  usePhaseView,
-  experimentStatusLabel,
-} from "@/lib/stageLabels";
-
-// ---------------------------------------------------------------------------
-// Page
-// ---------------------------------------------------------------------------
+import { LABEL_ZH, KNOWN_KEYS, renderValue } from "@/components/experiment/CheckpointCard";
+import { usePhaseView } from "@/lib/stageLabels";
+import { cn } from "@/lib/cn";
+import { TONE_CLASSES } from "@/lib/statusMeta";
 
 type Decision = "approve" | "edit" | "skip" | "abort";
+
+/** 抽屉 Tab：阶段与决策 / 运行记录 / 研究问题。 */
+type DrawerTab = "stages" | "runs" | "question";
 
 export default function ExperimentDetailPage() {
   const { expId } = useParams<{ expId: string }>();
   const qc = useQueryClient();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [command, setCommand] = useState("uv run python -m src.train experiment=baseline");
   const [seed, setSeed] = useState("42");
   const [confirming, setConfirming] = useState(false);
+  const [confirmingAbort, setConfirmingAbort] = useState(false);
   const [activeRun, setActiveRun] = useState<string | null>(null);
-  const [taskId, setTaskId] = useState<string | null>(null);
+  // The agent task whose live log we're showing. Restored from ?task= or
+  // the workflows feed — survives reloads and sidebar navigation.
+  const [taskId, setTaskId] = useState<string | null>(searchParams.get("task"));
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [drawerTab, setDrawerTab] = useState<DrawerTab>("stages");
+  // The stage selected in the stepper (rendered in the drawer's stages tab).
+  const [selectedStageKey, setSelectedStageKey] = useState<string | null>(null);
   const [rqDraft, setRqDraft] = useState<string>("");
+  const [showFailedReason, setShowFailedReason] = useState(false);
+  const logAnchorRef = useRef<HTMLDivElement>(null);
 
-  // True while a /decide request is in flight. We set it synchronously in
-  // decideMutation.onMutate (before the first await) so the stageProgress
-  // query's refetchInterval sees it on the immediate re-render and returns
-  // false -> TanStack clears the already-scheduled 2s refetch timer.
-  // Without this, that timer can fire mid-round-trip and overwrite the
-  // optimistic update with the server's stale `waiting_user` payload
-  // (the orchestrator hasn't woken up yet), snapping the hero back to
-  // "等待你的确认" for a moment. See decideMutation below.
+  // True while a /decide request is in flight (see decideMutation below).
   const decidePendingRef = useRef(false);
 
   const view = usePhaseView();
 
-  // Gate queries on expId so we don't request /experiments/undefined.
-  const { data: exp } = useQuery({
-    queryKey: ["experiment", expId],
+  const expQuery = useQuery({
+    queryKey: qk.experiments.one(expId!),
     queryFn: () => api.getExperiment(expId!),
     enabled: !!expId,
   });
+  const exp = expQuery.data;
   useEffect(() => {
     if (exp) setRqDraft(exp.research_question ?? "");
-  }, [exp?.research_question]);
+  }, [exp?.research_question]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const { data: runs = [] } = useQuery({
-    queryKey: ["runs", expId],
+    queryKey: qk.experiments.runs(expId!),
     queryFn: () => api.listRuns(expId!),
     enabled: !!expId,
     refetchInterval: (q) =>
@@ -110,7 +94,7 @@ export default function ExperimentDetailPage() {
   });
 
   const { data: stageProgress } = useQuery({
-    queryKey: ["experiment-stages", expId],
+    queryKey: qk.experiments.stages(expId!),
     queryFn: () => api.listStages(expId!),
     enabled: !!expId,
     refetchInterval: (q) => {
@@ -118,14 +102,26 @@ export default function ExperimentDetailPage() {
       // don't clobber the optimistic update with stale server data.
       if (decidePendingRef.current) return false;
       const d = q.state.data;
-      if (!d) return 4000;
-      const active = d.stages.some(
-        (s) => s.status === "running" || s.status === "waiting_for_user",
-      );
-      return active ? 2000 : 4000;
+      if (!d) return false;
+      // Poll only while work is actually in flight. Terminal, paused and
+      // waiting states change only via explicit user actions (which
+      // invalidate), so a standing 4s timer was pure noise.
+      const active =
+        d.overall_status === "running" ||
+        d.stages.some((s) => s.status === "running");
+      return active ? 2000 : false;
     },
     refetchOnWindowFocus: false,
   });
+
+  // Restore the live task when we don't know it (reload / deep link /
+  // arriving from the sidebar). The shared workflows feed is the answer.
+  const { data: workflows } = useActiveWorkflows();
+  useEffect(() => {
+    if (taskId || !expId) return;
+    const t = findTaskForExperiment(workflows, expId);
+    if (t) setTaskId(t.id);
+  }, [workflows, expId, taskId]);
 
   const decisionHistory = stageProgress?.decision_history ?? [];
 
@@ -141,14 +137,14 @@ export default function ExperimentDetailPage() {
     onError: (err) => showFriendlyError(err),
     onSuccess: (run) => {
       setActiveRun(run.id);
-      qc.invalidateQueries({ queryKey: ["runs", expId] });
+      qc.invalidateQueries({ queryKey: qk.experiments.runs(expId!) });
     },
   });
 
   const stopMutation = useMutation({
     mutationFn: (runId: string) => api.stopRun(runId),
     onError: (err) => showFriendlyError(err),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["runs", expId] }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.experiments.runs(expId!) }),
   });
 
   const saveMetaMutation = useMutation({
@@ -157,7 +153,7 @@ export default function ExperimentDetailPage() {
         research_question: rqDraft.trim() ? rqDraft.trim() : undefined,
       }),
     onError: (err) => showFriendlyError(err),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["experiment", expId] }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.experiments.one(expId!) }),
   });
 
   const launchMutation = useMutation({
@@ -165,39 +161,23 @@ export default function ExperimentDetailPage() {
     onError: (err) => showFriendlyError(err),
     onSuccess: (data) => {
       setTaskId(data.task_id);
-      qc.invalidateQueries({ queryKey: ["experiment-stages", expId] });
-      qc.invalidateQueries({ queryKey: ["experiment", expId] });
+      // Reflect the task in the URL so a reload / copy-paste restores the
+      // live log view (the deep-link contract).
+      setSearchParams((prev) => {
+        const next = new URLSearchParams(prev);
+        next.set("task", data.task_id);
+        return next;
+      }, { replace: true });
+      qc.invalidateQueries({ queryKey: qk.experiments.stages(expId!) });
+      qc.invalidateQueries({ queryKey: qk.experiments.one(expId!) });
+      qc.invalidateQueries({ queryKey: qk.workflows.active });
     },
   });
 
   /**
-   * Decide mutation with OPTIMISTIC UPDATE + ROLLBACK.
-   *
-   * The original implementation only invalidated the cache after the
-   * server returned, which left the user staring at "等待决策" for
-   * several seconds after they clicked 确认. Worse, it only patched
-   * `stage.status`, while the page-level topbar badge reads
-   * `stageProgress.overall_status` — so the badge still said "等待决策"
-   * even when the underlying stage flipped to "approved". The new flow:
-   *
-   *   1. `onMutate` — cancel any in-flight refetch, snapshot the
-   *      current stage cache, write BOTH the stage status AND the
-   *      experiment-level overall_status so every UI surface that
-   *      reads from either one switches immediately.
-   *   2. server call — POST /decide.
-   *   3. `onError` — restore the snapshot so the UI snaps back.
-   *   4. `onSettled` — invalidate so the canonical server data wins.
-   *
-   * The optimistic mapping (mirrors `backend/app/routers/experiments.py`
-   * `decide_stage` — it DOES transition the stage row + `overall_status`
-   * synchronously in the same POST (not just `approval.status`), so the
-   * refetch fired by `onSettled` returns the same state we paint
-   * optimistically - no flicker. We mirror that transition locally so
-   * the UI flips instantly the moment the user clicks):
-   *   - approve → overall_status="running", stage.status="completed"
-   *   - skip    → overall_status="running", stage.status="skipped"
-   *   - edit    → overall_status="running", stage.status="completed"
-   *   - abort   → overall_status="paused",  stage.status="needs_revision"
+   * Decide mutation with OPTIMISTIC UPDATE + ROLLBACK (see git history for
+   * the full rationale — the short version: the UI flips the moment the
+   * user clicks; server rejection restores the snapshot).
    */
   const decideMutation = useMutation({
     mutationFn: (vars: {
@@ -206,13 +186,11 @@ export default function ExperimentDetailPage() {
       target_stage_id?: string | null;
     }) => api.decideStage(expId!, vars),
     onMutate: async (vars) => {
-      // Set synchronously BEFORE any await so the refetchInterval pause
-      // takes effect on the immediate re-render (see decidePendingRef).
       decidePendingRef.current = true;
-      await qc.cancelQueries({ queryKey: ["experiment-stages", expId] });
-      await qc.cancelQueries({ queryKey: ["experiment", expId] });
-      const prevStages = qc.getQueryData<StageProgressData>(["experiment-stages", expId]);
-      const prevExp = qc.getQueryData<typeof exp>(["experiment", expId]);
+      await qc.cancelQueries({ queryKey: qk.experiments.stages(expId!) });
+      await qc.cancelQueries({ queryKey: qk.experiments.one(expId!) });
+      const prevStages = qc.getQueryData<StageProgressData>(qk.experiments.stages(expId!));
+      const prevExp = qc.getQueryData<typeof exp>(qk.experiments.one(expId!));
       const isAbort = vars.decision === "abort";
       const optimisticStageStatus: string =
         vars.decision === "approve" || vars.decision === "edit"
@@ -222,9 +200,8 @@ export default function ExperimentDetailPage() {
             : "needs_revision";
       const optimisticOverall: string = isAbort ? "paused" : "running";
       if (prevStages) {
-        qc.setQueryData<StageProgressData>(["experiment-stages", expId], {
+        qc.setQueryData<StageProgressData>(qk.experiments.stages(expId!), {
           ...prevStages,
-          // The topbar badge + the hero variant both read overall_status.
           overall_status: optimisticOverall,
           stages: prevStages.stages.map((s) =>
             s.status === "waiting_for_user" ? { ...s, status: optimisticStageStatus } : s,
@@ -232,10 +209,7 @@ export default function ExperimentDetailPage() {
         });
       }
       if (prevExp) {
-        // Exp fallback (`stageProgress?.overall_status ?? exp.overall_status`)
-        // is read from this cache — patch it too so refresh during the
-        // round-trip doesn't blink back to "waiting_user".
-        qc.setQueryData<typeof exp>(["experiment", expId], {
+        qc.setQueryData<typeof exp>(qk.experiments.one(expId!), {
           ...prevExp,
           overall_status: optimisticOverall,
         });
@@ -243,17 +217,46 @@ export default function ExperimentDetailPage() {
       return { prev: prevStages, prevExp };
     },
     onError: (err, _vars, ctx) => {
-      if (ctx?.prev) qc.setQueryData(["experiment-stages", expId], ctx.prev);
-      if (ctx?.prevExp) qc.setQueryData(["experiment", expId], ctx.prevExp);
+      if (ctx?.prev) qc.setQueryData(qk.experiments.stages(expId!), ctx.prev);
+      if (ctx?.prevExp) qc.setQueryData(qk.experiments.one(expId!), ctx.prevExp);
       showFriendlyError(err);
     },
     onSettled: () => {
       decidePendingRef.current = false;
-      qc.invalidateQueries({ queryKey: ["experiment-stages", expId] });
-      qc.invalidateQueries({ queryKey: ["experiment", expId] });
+      qc.invalidateQueries({ queryKey: qk.experiments.stages(expId!) });
+      qc.invalidateQueries({ queryKey: qk.experiments.one(expId!) });
+      qc.invalidateQueries({ queryKey: qk.workflows.active });
     },
   });
 
+  // ---- Loading / error states (previously: error → spinner forever) ----
+  if (expQuery.isError) {
+    return (
+      <div className="p-6">
+        <Card className="mx-auto max-w-xl p-6">
+          <div className="flex items-start gap-3">
+            <div className="rounded-full bg-destructive/10 p-2 shrink-0">
+              <AlertTriangle className="h-5 w-5 text-destructive" />
+            </div>
+            <div className="flex-1">
+              <h2 className="text-base font-semibold">实验加载失败</h2>
+              <p className="mt-1 text-sm text-muted-foreground">
+                没能读取这个实验的数据。它可能已被删除,或服务暂时不可用。
+              </p>
+              <div className="mt-4 flex gap-2">
+                <Button size="sm" variant="outline" onClick={() => expQuery.refetch()}>
+                  <RotateCw className="h-3.5 w-3.5" /> 重试
+                </Button>
+                <Button size="sm" variant="ghost" onClick={() => navigate("..")}>
+                  返回实验列表
+                </Button>
+              </div>
+            </div>
+          </div>
+        </Card>
+      </div>
+    );
+  }
   if (!exp) {
     return (
       <div className="p-6">
@@ -264,98 +267,110 @@ export default function ExperimentDetailPage() {
 
   const running = runs.find((r) => r.status === "running");
   const overall = stageProgress?.overall_status ?? exp.overall_status ?? "draft";
-  const overallLabel = experimentStatusLabel(view, overall);
-  const rqEmpty = !(exp.research_question ?? "").trim();
   const rqDirty = (rqDraft ?? "") !== (exp.research_question ?? "");
   const failedReason = overall === "failed" ? stageProgress?.last_error ?? null : null;
+  const hasWaiting = !!stageProgress?.stages.some((s) => s.status === "waiting_for_user");
 
-  const variant: "draft" | "running" | "waiting_user" | "completed" | "failed" =
+  const variant: "draft" | "running" | "waiting_user" | "completed" | "failed" | "paused" =
     overall === "completed"
       ? "completed"
       : overall === "failed"
         ? "failed"
-        : overall === "waiting_user"
-          ? "waiting_user"
-          : overall === "running" || overall === "paused"
-            ? "running"
-            : "draft";
+        : overall === "paused"
+          ? "paused"
+          : overall === "waiting_user" || hasWaiting
+            ? "waiting_user"
+            : overall === "running"
+              ? "running"
+              : "draft";
 
-  // ---- Handlers for the bottom action bar ------------------------------
-  const handlePrimary = () => {
-    if (variant === "draft") launchMutation.mutate();
-    else if (variant === "completed") navigate(`/experiments/${expId}/result`);
-    else if (variant === "failed") launchMutation.mutate();
-    else if (variant === "waiting_user") decideMutation.mutate({ decision: "approve" });
-    else navigate(`/experiments/${expId}/runs`);
-  };
-  const handleSecondary = (which: 1 | 2) => {
-    if (variant === "waiting_user" && which === 1) {
-      // "调整方案" → open advanced drawer
-      setAdvancedOpen(true);
-    } else if (variant === "waiting_user" && which === 2) {
-      decideMutation.mutate({ decision: "abort" });
-    } else if (variant === "failed" && which === 2) {
-      setAdvancedOpen(true);
-    } else if (variant === "draft" && which === 2) {
-      setAdvancedOpen((o) => !o);
-    } else if (variant === "running" && which === 1) {
-      // 暂停 — Phase 5 will wire to a real endpoint
-      setAdvancedOpen(true);
+  const resultPath = `/experiments/${expId}/result`;
+  const writingPath = `/projects/${exp.project_id}/writing`;
+
+  // ---- Semantic actions from the sticky bar (every key is wired) --------
+  const handleAction = (key: ActionKey) => {
+    switch (key) {
+      case "launch":
+      case "retry":
+      case "resume":
+        launchMutation.mutate();
+        break;
+      case "approve":
+        decideMutation.mutate({ decision: "approve" });
+        break;
+      case "abort":
+        setConfirmingAbort(true);
+        break;
+      case "editPlan":
+      case "editQuestion":
+        setAdvancedOpen(true);
+        setDrawerTab("question");
+        break;
+      case "showReason":
+        setShowFailedReason((v) => !v);
+        break;
+      case "scrollToLog":
+        if (taskId) {
+          logAnchorRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+        } else {
+          // No live stream to show — open the run history instead.
+          setAdvancedOpen(true);
+        }
+        break;
+      case "viewResult":
+        navigate(resultPath);
+        break;
+      case "nextRound":
+        navigate(resultPath);
+        break;
+      case "generateReport":
+        navigate(writingPath);
+        break;
     }
   };
 
   return (
-    <div className="flex min-h-[calc(100vh-3.5rem)] flex-col pb-20">
-      {/* Page-level header sits BELOW ProjectLayout's sticky project+tab bar
-          (which provides the project name and section tabs). Rendering
-          another sticky bar here used to create a 56px phantom gap because
-          ProjectLayout's actual header height varies with its content.
-          Keeping this in normal flow lets the page visually hug the
-          project bar above. */}
-      <header className="border-b bg-background">
-        <div className="mx-auto max-w-5xl px-4 py-3 md:px-6">
-          <div className="flex items-center justify-between gap-3 flex-wrap">
-            <div className="min-w-0">
-              <div className="text-xs text-muted-foreground">实验详情</div>
-              <h1 className="truncate text-lg font-semibold tracking-tight">
-                {exp.title}
-              </h1>
-              {exp.research_question && (
-                <div className="mt-0.5 truncate text-xs text-muted-foreground">
-                  {exp.research_question}
-                </div>
-              )}
-            </div>
-            <Badge
-              className={
-                overall === "completed"
-                  ? "bg-green-100 text-green-800"
-                  : overall === "failed"
-                    ? "bg-red-100 text-red-800"
-                    : overall === "running" || overall === "waiting_user"
-                      ? "bg-blue-100 text-blue-800"
-                      : overall === "paused"
-                        ? "bg-amber-100 text-amber-800"
-                        : "bg-slate-100 text-slate-700"
-              }
-              data-testid="overall-status-badge"
-            >
-              {overallLabel}
-            </Badge>
+    <div className="flex flex-col pb-20">
+      {/* Title row — first content block. This page lives under the
+          ProjectLayout header, so it must not render its own bordered band
+          (one-header rule). */}
+      <div className="pt-6 px-4 md:px-6 mx-auto max-w-5xl w-full">
+        <div className="flex items-center justify-between gap-3 flex-wrap">
+          <div className="min-w-0">
+            <div className="text-xs text-muted-foreground">实验详情</div>
+            <h1 className="truncate text-lg font-semibold tracking-tight">
+              {exp.title}
+            </h1>
+            {exp.research_question && (
+              <div className="mt-0.5 truncate text-xs text-muted-foreground">
+                {exp.research_question}
+              </div>
+            )}
           </div>
-          {stageProgress && stageProgress.stages.length > 0 && (
-            <div className="mt-3">
-              <FivePhaseStepper
-                stages={stageProgress.stages}
-                currentStage={stageProgress.current_stage}
-              />
-            </div>
-          )}
+          <StatusBadge
+            status={overall}
+            label={view.experiment_status_zh[overall] ?? undefined}
+            data-testid="overall-status-badge"
+          />
         </div>
-      </header>
+      </div>
 
-      {/* Main content area */}
       <main className="mx-auto w-full max-w-5xl flex-1 space-y-4 px-4 py-6 md:px-6">
+        {stageProgress && stageProgress.stages.length > 0 && (
+          <Card className="p-4">
+            <FivePhaseStepper
+              stages={stageProgress.stages}
+              currentStage={stageProgress.current_stage}
+              onSelectStage={(row: ExperimentStage | null, key: string) => {
+                // 点击阶段格子 → 打开「阶段与决策」Tab 并定位该阶段详情。
+                setSelectedStageKey(key);
+                setAdvancedOpen(true);
+                setDrawerTab("stages");
+                void row;
+              }}
+            />
+          </Card>
+        )}
         <CurrentStageHero
           exp={exp}
           stageProgress={
@@ -371,34 +386,45 @@ export default function ExperimentDetailPage() {
           }
           currentStageKey={stageProgress?.current_stage ?? exp.current_stage}
           decidePending={decideMutation.isPending}
-          failedReason={failedReason}
-          onDecide={(d, payload) => decideMutation.mutate({ decision: d, payload })}
+          failedReason={showFailedReason ? failedReason : null}
+          onDecide={(d, payload) =>
+            d === "abort"
+              ? setConfirmingAbort(true)
+              : decideMutation.mutate({ decision: d, payload })
+          }
           onStart={() => launchMutation.mutate()}
+          onEditQuestion={() => {
+            setAdvancedOpen(true);
+            setDrawerTab("question");
+          }}
           onRetry={() => launchMutation.mutate()}
+          onViewResult={() => navigate(resultPath)}
+          onNextRound={() => navigate(resultPath)}
+          onGenerateReport={() => navigate(writingPath)}
         />
 
+        {/* Live agent log — restored from ?task= / workflows feed, so the
+            "agent is alive" signal survives reloads and navigation. */}
         {taskId && (
-          <Card className="p-4">
-            <AutonomousPanel taskId={taskId} onReset={() => setTaskId(null)} />
-          </Card>
+          <div ref={logAnchorRef} className="scroll-mt-20">
+            <AutonomousPanel
+              taskId={taskId}
+              onReset={() => {
+                setTaskId(null);
+                setSearchParams((prev) => {
+                  const next = new URLSearchParams(prev);
+                  next.delete("task");
+                  return next;
+                }, { replace: true });
+              }}
+            />
+          </div>
         )}
 
-        {stageProgress && (
-          <StageSummaryRow
-            confirmedItems={
-              stageProgress.decision_history?.length
-                ? [`本实验已记录 ${stageProgress.decision_history.length} 次决策`]
-                : []
-            }
-            artifactHeadline={
-              stageProgress.current_stage
-                ? `当前阶段:${view.stage_status_zh["running"] ?? "进行中"}`
-                : null
-            }
-          />
-        )}
-
-        {/* Advanced drawer — collapsed by default */}
+        {/* Advanced drawer — collapsed by default, three tabs:
+            阶段与决策 / 运行记录 / 研究问题。此前四块内容垂直堆在一个
+            折叠区里（RQ 编辑器、决策历史、手动运行、运行记录混排），
+            现在按用户意图分层。 */}
         <Card className="overflow-hidden">
           <button
             type="button"
@@ -406,7 +432,7 @@ export default function ExperimentDetailPage() {
             className="flex w-full items-center justify-between px-4 py-3 text-sm font-medium hover:bg-muted/40"
             aria-expanded={advancedOpen}
           >
-            <span>查看研究详情</span>
+            <span>研究详情</span>
             {advancedOpen ? (
               <ChevronDown className="h-4 w-4" />
             ) : (
@@ -414,119 +440,165 @@ export default function ExperimentDetailPage() {
             )}
           </button>
           {advancedOpen && (
-            <div className="space-y-4 border-t p-4">
-              <div>
-                <div className="text-xs text-muted-foreground mb-1">
-                  研究问题(高级模式可编辑)
-                </div>
-                <Textarea
-                  rows={2}
-                  value={rqDraft}
-                  onChange={(e) => setRqDraft(e.target.value)}
-                  placeholder="例如:相比基线,新方法在 X 数据集上的准确率是否提升 ≥2%?"
-                  className="text-sm"
-                />
-                {rqDirty && (
-                  <div className="mt-2 flex justify-end">
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => saveMetaMutation.mutate()}
-                      disabled={saveMetaMutation.isPending}
-                    >
-                      {saveMetaMutation.isPending ? "保存中…" : "保存"}
-                    </Button>
+            <>
+              <div className="border-t border-border/60 flex gap-1 px-3 pt-2" role="tablist">
+                {(
+                  [
+                    { key: "stages", label: "阶段与决策" },
+                    { key: "runs", label: "运行记录" },
+                    { key: "question", label: "研究问题" },
+                  ] as const
+                ).map((t) => (
+                  <button
+                    key={t.key}
+                    type="button"
+                    role="tab"
+                    aria-selected={drawerTab === t.key}
+                    onClick={() => setDrawerTab(t.key)}
+                    className={cn(
+                      "rounded-t-md px-3 py-1.5 text-sm border-b-2 transition-colors duration-sm",
+                      drawerTab === t.key
+                        ? "border-primary text-foreground font-medium"
+                        : "border-transparent text-muted-foreground hover:text-foreground",
+                    )}
+                  >
+                    {t.label}
+                  </button>
+                ))}
+              </div>
+              <div className="border-t border-border/60">
+                {drawerTab === "stages" && (
+                  <div className="p-4 space-y-4">
+                    {selectedStageKey &&
+                      (() => {
+                        const row = stageProgress?.stages.find(
+                          (s) => s.stage_key === selectedStageKey,
+                        );
+                        if (!row) return null;
+                        return (
+                          <div className="rounded-lg border border-border/60 p-3 space-y-2">
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="text-sm font-medium">{row.stage_name_zh}</span>
+                              <StatusBadge status={row.status} />
+                            </div>
+                            <StageSummary stage={row} />
+                          </div>
+                        );
+                      })()}
+                    {decisionHistory.length > 0 ? (
+                      <DecisionHistory history={decisionHistory as Array<Record<string, unknown>>} />
+                    ) : (
+                      <EmptyHint text="还没有任何决策记录 —— 启动实验后,每个阶段完成时你都会在这里确认。" />
+                    )}
+                  </div>
+                )}
+
+                {drawerTab === "runs" && (
+                  <div className="divide-y divide-border/60">
+                    <div className="p-4">
+                      <div className="font-medium text-sm mb-2">手动运行</div>
+                      <Textarea
+                        rows={2}
+                        value={command}
+                        onChange={(e) => setCommand(e.target.value)}
+                        className="font-mono text-xs"
+                      />
+                      <div className="flex gap-2 items-center mt-2">
+                        <Input
+                          placeholder="随机种子"
+                          value={seed}
+                          onChange={(e) => setSeed(e.target.value)}
+                          className="w-32"
+                        />
+                        <Button
+                          onClick={() => setConfirming(true)}
+                          disabled={!!running || runMutation.isPending}
+                          size="sm"
+                        >
+                          <Play className="h-3 w-3" /> 运行
+                        </Button>
+                        {running && (
+                          <Button
+                            variant="destructive"
+                            size="sm"
+                            onClick={() => stopMutation.mutate(running.id)}
+                            loading={stopMutation.isPending}
+                          >
+                            {!stopMutation.isPending && <Square className="h-3 w-3" />}
+                            停止
+                          </Button>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="p-4">
+                      <div className="font-medium text-sm">运行记录</div>
+                      {runs.length === 0 ? (
+                        <EmptyHint text="还没有运行记录。启动自主实验或手动运行后,这里会显示每次运行的命令、日志与指标。" />
+                      ) : (
+                        <div className="mt-2 divide-y divide-border/60">
+                          {runs.map((r, idx) => (
+                            <div key={r.id} className="py-3 first:pt-0 last:pb-0">
+                              <div className="flex items-center justify-between">
+                                <div className="text-xs text-muted-foreground">
+                                  运行 #{runs.length - idx}
+                                  {r.created_at && (
+                                    <span className="ml-2">{fmtTime(r.created_at)}</span>
+                                  )}
+                                </div>
+                                <StatusBadge status={r.status} />
+                              </div>
+                              <div className="text-xs text-muted-foreground mt-1 break-all">
+                                {r.command}
+                              </div>
+                              {(r.status === "running" || activeRun === r.id) && (
+                                <RunStream runId={r.id} expId={expId!} />
+                              )}
+                              {r.status !== "running" && (
+                                <div className="mt-2">
+                                  <RunMetrics runId={r.id} />
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    {runs.filter((r) => r.status === "completed").length >= 2 && (
+                      <CompareRuns runs={runs.filter((r) => r.status === "completed")} />
+                    )}
+                  </div>
+                )}
+
+                {drawerTab === "question" && (
+                  <div className="p-4">
+                    <div className="text-xs text-muted-foreground mb-1">
+                      研究问题(可随时修改,后续阶段将基于修改后的问题)
+                    </div>
+                    <Textarea
+                      rows={2}
+                      value={rqDraft}
+                      onChange={(e) => setRqDraft(e.target.value)}
+                      placeholder="例如:相比基线,新方法在 X 数据集上的准确率是否提升 ≥2%?"
+                      className="text-sm"
+                    />
+                    {rqDirty && (
+                      <div className="mt-2 flex justify-end">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => saveMetaMutation.mutate()}
+                          loading={saveMetaMutation.isPending}
+                        >
+                          保存
+                        </Button>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
-
-              {decisionHistory.length > 0 && (
-                <DecisionHistory history={decisionHistory as Array<Record<string, unknown>>} />
-              )}
-
-              <div>
-                <div className="font-medium text-sm mb-2">手动运行</div>
-                <Textarea
-                  rows={2}
-                  value={command}
-                  onChange={(e) => setCommand(e.target.value)}
-                  className="font-mono text-xs"
-                />
-                <div className="flex gap-2 items-center mt-2">
-                  <Input
-                    placeholder="随机种子"
-                    value={seed}
-                    onChange={(e) => setSeed(e.target.value)}
-                    className="w-32"
-                  />
-                  <Button
-                    onClick={() => setConfirming(true)}
-                    disabled={!!running || runMutation.isPending}
-                    size="sm"
-                  >
-                    <Play className="h-3 w-3" /> 运行
-                  </Button>
-                  {running && (
-                    <Button
-                      variant="destructive"
-                      size="sm"
-                      onClick={() => stopMutation.mutate(running.id)}
-                      disabled={stopMutation.isPending}
-                    >
-                      <Square className="h-3 w-3" />
-                      {stopMutation.isPending ? "停止中…" : "停止"}
-                    </Button>
-                  )}
-                </div>
-              </div>
-
-              <div className="grid gap-3">
-                <div className="font-medium text-sm">运行记录</div>
-                {runs.length === 0 && (
-                  <Card className="p-4 text-center text-muted-foreground text-sm">
-                    还没有运行记录
-                  </Card>
-                )}
-                {runs.map((r, idx) => (
-                  <Card key={r.id} className="p-3">
-                    <div className="flex items-center justify-between">
-                      <div className="text-xs text-muted-foreground">
-                        运行 #{runs.length - idx}
-                        {r.created_at && (
-                          <span className="ml-2">{fmtTime(r.created_at)}</span>
-                        )}
-                      </div>
-                      <Badge
-                        className={
-                          r.status === "completed"
-                            ? "bg-green-100 text-green-800"
-                            : r.status === "failed" || r.status === "stopped"
-                              ? "bg-red-100 text-red-800"
-                              : "bg-blue-100 text-blue-800"
-                        }
-                      >
-                        {runStatusLabel(r.status)}
-                      </Badge>
-                    </div>
-                    <div className="text-xs text-muted-foreground mt-1 break-all">
-                      {r.command}
-                    </div>
-                    {(r.status === "running" || activeRun === r.id) && (
-                      <RunStream runId={r.id} expId={expId!} />
-                    )}
-                    {r.status !== "running" && (
-                      <div className="mt-2">
-                        <RunMetrics runId={r.id} />
-                      </div>
-                    )}
-                  </Card>
-                ))}
-              </div>
-
-              {runs.filter((r) => r.status === "completed").length >= 2 && (
-                <CompareRuns runs={runs.filter((r) => r.status === "completed")} />
-              )}
-            </div>
+            </>
           )}
         </Card>
 
@@ -534,14 +606,13 @@ export default function ExperimentDetailPage() {
           <Button
             variant="outline"
             size="sm"
-            onClick={() => navigate(`/experiments/${expId}/result`)}
+            onClick={() => navigate(resultPath)}
           >
             查看完整结果 <ArrowRight className="h-3.5 w-3.5" />
           </Button>
         )}
       </main>
 
-      {/* Sticky action bar */}
       <StickyActionBar
         variant={variant}
         primaryPending={
@@ -549,8 +620,7 @@ export default function ExperimentDetailPage() {
           decideMutation.isPending ||
           saveMetaMutation.isPending
         }
-        onPrimary={handlePrimary}
-        onSecondary={handleSecondary}
+        onAction={handleAction}
       />
 
       <ConfirmDialog
@@ -579,67 +649,101 @@ export default function ExperimentDetailPage() {
           runMutation.mutate();
         }}
       />
-      {/* Touch the unused rqEmpty so the linter doesn't drop it (we still
-          want it surfaced via the disabled state on the primary action). */}
-      <span className="sr-only">{rqEmpty ? "rq-empty" : "rq-ok"}</span>
+
+      <ConfirmDialog
+        open={confirmingAbort}
+        title="结束本次实验?"
+        busy={decideMutation.isPending}
+        danger
+        description="当前阶段的进度会保留,但本轮工作流将暂停。你可以之后从暂停状态继续。"
+        confirmLabel="结束本次"
+        onCancel={() => setConfirmingAbort(false)}
+        onConfirm={() => {
+          setConfirmingAbort(false);
+          decideMutation.mutate({ decision: "abort" });
+        }}
+      />
     </div>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Helpers (kept from the previous version; same EventSource plumbing)
+// Drawer helpers
 // ---------------------------------------------------------------------------
+
+/** 抽屉「阶段与决策」Tab：渲染选中阶段的 checkpoint 摘要（与 CheckpointCard
+ *  同一套标签/渲染函数，视觉一致；限 8 键防止堆砌）。 */
+function StageSummary({ stage }: { stage: ExperimentStage }) {
+  const summary = (stage.checkpoint_summary ?? {}) as Record<string, unknown>;
+  const keys = KNOWN_KEYS.filter(
+    (k) => k in summary && summary[k as keyof typeof summary] != null,
+  ).slice(0, 8);
+  if (keys.length === 0) return null;
+  return (
+    <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-2 text-sm">
+      {keys.map((k) => (
+        <div key={String(k)} className="min-w-0">
+          <dt className="text-[11px] tracking-wide text-muted-foreground">
+            {LABEL_ZH[k] ?? k}
+          </dt>
+          <dd className="text-foreground/90">{renderValue(summary[k as keyof typeof summary])}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+function EmptyHint({ text }: { text: string }) {
+  return (
+    <div className="py-6 text-center text-sm text-muted-foreground leading-relaxed">
+      {text}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Run log stream — server replays the whole log on reconnect, so the buffer
+// resets whenever the stream reconnects (no duplicated lines). The buffer is
+// CAPPED to the last MAX_LOG_LINES lines: a multi-hour training run would
+// otherwise grow an unbounded string (tens of MB → re-render + scroll cost
+// on every SSE tick).
+// ---------------------------------------------------------------------------
+
+const MAX_LOG_LINES = 800;
 
 function RunStream({ runId, expId }: { runId: string; expId: string }) {
   const [logs, setLogs] = useState("");
-  const [done, setDone] = useState(false);
-  const [disconnected, setDisconnected] = useState(false);
+  const [truncated, setTruncated] = useState(false);
   const qc = useQueryClient();
   const ref = useRef<HTMLPreElement>(null);
 
-  useEffect(() => {
-    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-    let closed = false;
-    let backoffMs = 500;
-    const maxBackoffMs = 8000;
-    let es: EventSource | null = null;
-
-    const open = () => {
-      if (closed) return;
-      es = new EventSource(api.runStreamUrl(runId));
-      es.onmessage = (ev) => {
-        try {
-          const data = JSON.parse(ev.data);
-          if (data.kind === "done") {
-            setDone(true);
-            setDisconnected(false);
-            es?.close();
-            qc.invalidateQueries({ queryKey: ["runs", expId] });
-          } else if (data.text) {
-            setLogs((l) => l + data.text);
-            setDisconnected(false);
-          }
-        } catch {
-          /* ignore */
+  const { status: streamStatus, reconnect } = useEventSource({
+    url: api.runStreamUrl(runId),
+    onEvent: (ev) => {
+      if (!ev.text) return;
+      setLogs((l) => {
+        const next = l + ev.text;
+        const lines = next.split("\n");
+        if (lines.length > MAX_LOG_LINES) {
+          setTruncated(true);
+          return lines.slice(-MAX_LOG_LINES).join("\n");
         }
-      };
-      es.onerror = () => {
-        es?.close();
-        es = null;
-        setDisconnected(true);
-        if (closed) return;
-        backoffMs = Math.min(backoffMs * 2, maxBackoffMs);
-        reconnectTimer = setTimeout(open, backoffMs);
-      };
-    };
-    open();
+        return next;
+      });
+    },
+    onDone: () => qc.invalidateQueries({ queryKey: qk.experiments.runs(expId) }),
+  });
 
-    return () => {
-      closed = true;
-      if (reconnectTimer) clearTimeout(reconnectTimer);
-      es?.close();
-    };
-  }, [runId, expId, qc]);
+  // Server replays from offset 0 on every connect — reset the buffer when
+  // a (re)connection opens so replayed content doesn't double up.
+  const prevStatus = useRef(streamStatus);
+  useEffect(() => {
+    if (streamStatus === "connecting" && prevStatus.current !== "connecting") {
+      setLogs("");
+      setTruncated(false);
+    }
+    prevStatus.current = streamStatus;
+  }, [streamStatus]);
 
   useEffect(() => {
     if (ref.current) ref.current.scrollTop = ref.current.scrollHeight;
@@ -649,14 +753,21 @@ function RunStream({ runId, expId }: { runId: string; expId: string }) {
     <div className="mt-2">
       <pre
         ref={ref}
-        className="text-xs bg-black text-green-300 p-2 rounded max-h-64 overflow-auto font-mono"
+        className="max-h-64 overflow-auto rounded-lg bg-[#16181C] p-2 font-mono text-xs text-emerald-300/90"
       >
-        {logs || "（等待输出…）"}
-        {done && "\n【运行已结束】"}
+        {truncated && "（日志过长，仅显示最后 800 行）\n"}
+        {logs || "(等待输出…)"}
+        {streamStatus === "done" && "\n【运行已结束】"}
       </pre>
-      {disconnected && !done && (
-        <div className="text-xs text-amber-600 mt-1">
-          日志流断开,正在重连…
+      {streamStatus === "retrying" && (
+        <div className="text-xs text-amber-600 mt-1">日志流断开,正在重连…</div>
+      )}
+      {streamStatus === "failed" && (
+        <div className="text-xs text-destructive mt-1 flex items-center gap-2">
+          日志流已断开
+          <Button size="sm" variant="outline" className="h-6 px-2 text-xs" onClick={reconnect}>
+            重连
+          </Button>
         </div>
       )}
     </div>
@@ -665,7 +776,7 @@ function RunStream({ runId, expId }: { runId: string; expId: string }) {
 
 function RunMetrics({ runId }: { runId: string }) {
   const { data: metrics = [] } = useQuery({
-    queryKey: ["metrics", runId],
+    queryKey: qk.runs.metrics(runId),
     queryFn: () => api.getRunMetrics(runId),
   });
   if (metrics.length === 0) return null;
@@ -708,7 +819,7 @@ function CompareRuns({ runs }: { runs: Run[] }) {
   };
 
   return (
-    <Card className="p-4">
+    <div className="p-4">
       <div className="font-medium mb-2">实验对比</div>
       <div className="flex gap-2 flex-wrap mb-3">
         {runs.map((r) => (
@@ -737,7 +848,7 @@ function CompareRuns({ runs }: { runs: Run[] }) {
       {names.length > 0 && (
         <table className="text-xs w-full mt-3">
           <thead>
-            <tr className="border-b border-border">
+            <tr className="border-b border-border text-[11px] tracking-wide text-muted-foreground">
               <th className="text-left py-1">指标</th>
               {sel.map((id) => (
                 <th key={id} className="text-right py-1">
@@ -746,11 +857,11 @@ function CompareRuns({ runs }: { runs: Run[] }) {
               ))}
             </tr>
           </thead>
-          <tbody>
+          <tbody className="divide-y divide-border/60">
             {names.map((name) => {
               const best = bestBy(name);
               return (
-                <tr key={name} className="border-b border-border">
+                <tr key={name}>
                   <td className="py-1">{name}</td>
                   {sel.map((id) => {
                     const ms = (allMetrics[id] || []).filter(
@@ -760,9 +871,10 @@ function CompareRuns({ runs }: { runs: Run[] }) {
                     return (
                       <td
                         key={id}
-                        className={`text-right py-1 ${
-                          best?.runId === id ? "font-bold text-green-700" : ""
-                        }`}
+                        className={cn(
+                          "text-right py-1 tabular-nums",
+                          best?.runId === id && cn(TONE_CLASSES.green.text, "font-semibold"),
+                        )}
                       >
                         {v != null ? v.toFixed(4) : "—"}
                       </td>
@@ -774,6 +886,6 @@ function CompareRuns({ runs }: { runs: Run[] }) {
           </tbody>
         </table>
       )}
-    </Card>
+    </div>
   );
 }

@@ -214,6 +214,9 @@ class AgentTask(Base):
     # e.g. research.trend_analysis / research.generate_hypothesis / code.search_github /
     #      experiment.create_plan / writing.draft_section
     input_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Real column for the experiment an autonomous-run task drives (was
+    # previously buried inside input_json, forcing JSON scans per query).
+    experiment_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     plan_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String, default="pending")
     # pending / planning / awaiting_approval / running / completed / failed / rejected

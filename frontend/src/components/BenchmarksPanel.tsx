@@ -1,14 +1,19 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Search, ExternalLink, AlertTriangle, Plus, Trash2, Star, Info, FolderPlus } from "lucide-react";
-import { api, type Benchmark, type BenchmarkHit, type Experiment } from "@/lib/api";
+import { Search, ExternalLink, AlertTriangle, Plus, Trash2, Star, Info, FolderPlus, Database } from "@/components/ui/icons";
+import { api, qk, type Benchmark, type BenchmarkHit, type Experiment } from "@/api";
 import { formatBenchmarkSource, formatBenchmarkTags } from "@/lib/benchmarkTags";
 import { cn } from "@/lib/cn";
+import { TONE_CLASSES } from "@/lib/statusMeta";
+import { useToastMutation } from "@/lib/hooks/useToastMutation";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { Input, Textarea } from "@/components/ui/Input";
 import { Badge } from "@/components/ui/Badge";
-import { Spinner, ConfirmDialog } from "@/components/ui/Dialog";
+import { ConfirmDialog } from "@/components/ui/Dialog";
+import { Select, SelectOptions } from "@/components/ui/Select";
+import { ListSkeleton } from "@/components/ui/Skeleton";
+import { EmptyState } from "@/components/ui/EmptyState";
 import { Tooltip } from "@/components/ui/Tooltip";
 import { showFriendlyError } from "@/lib/useFriendlyError";
 
@@ -30,12 +35,12 @@ export default function BenchmarksPanel({
   const [deleting, setDeleting] = useState<Benchmark | null>(null);
 
   const { data: benchmarks = [], isLoading } = useQuery({
-    queryKey: ["benchmarks", projectId],
+    queryKey: qk.benchmarks.byProject(projectId),
     queryFn: () => api.listBenchmarks(projectId),
   });
 
   const { data: experiments = [] } = useQuery({
-    queryKey: ["experiments", projectId],
+    queryKey: qk.experiments.byProject(projectId),
     queryFn: () => api.listExperiments(projectId),
   });
 
@@ -44,6 +49,7 @@ export default function BenchmarksPanel({
     [benchmarks],
   );
 
+  // 搜索不是「存库」操作,失败时还要清空旧结果,所以保留自定义 onError。
   const searchMutation = useMutation({
     mutationFn: () => api.searchBenchmarks(projectId, { query, limit: 10 }),
     onSuccess: (r) => {
@@ -58,28 +64,31 @@ export default function BenchmarksPanel({
     },
   });
 
-  const addMutation = useMutation({
+  const addMutation = useToastMutation({
     mutationFn: (args: { hit: BenchmarkHit; experiment_id?: string | null }) =>
       api.addBenchmark(projectId, {
         ...args.hit,
         experiment_id: args.experiment_id ?? null,
       }),
+    successMessage: "已加入项目",
     onSuccess: (_row, vars) => {
-      qc.invalidateQueries({ queryKey: ["benchmarks", projectId] });
+      qc.invalidateQueries({ queryKey: qk.benchmarks.byProject(projectId) });
       setHits((prev) => prev.filter((h) => h.url !== vars.hit.url || h.name !== vars.hit.name));
     },
   });
 
-  const linkMutation = useMutation({
+  const linkMutation = useToastMutation({
     mutationFn: (args: { id: string; experiment_id: string | null }) =>
       api.updateBenchmark(args.id, { experiment_id: args.experiment_id }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["benchmarks", projectId] }),
+    successMessage: (_d, vars) => (vars.experiment_id ? "已关联到实验" : "已取消关联"),
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.benchmarks.byProject(projectId) }),
   });
 
-  const delMutation = useMutation({
+  const delMutation = useToastMutation({
     mutationFn: (id: string) => api.deleteBenchmark(id),
+    successMessage: "已从项目移除",
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["benchmarks", projectId] });
+      qc.invalidateQueries({ queryKey: qk.benchmarks.byProject(projectId) });
       setDeleting(null);
     },
   });
@@ -106,7 +115,8 @@ export default function BenchmarksPanel({
         <div className={cn("flex gap-2", compact && "w-full")}>
           <Button
             onClick={() => searchMutation.mutate()}
-            disabled={!query.trim() || searchMutation.isPending}
+            loading={searchMutation.isPending}
+            disabled={!query.trim()}
             className={cn("shrink-0 whitespace-nowrap", compact && "flex-1")}
           >
             <Search className="h-4 w-4" /> {searchMutation.isPending ? "搜索中…" : "搜索"}
@@ -122,7 +132,7 @@ export default function BenchmarksPanel({
       </div>
 
       {warnings.length > 0 && (
-        <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-md p-2 flex gap-2 shrink-0">
+        <div className={cn("text-xs rounded-md p-2 flex gap-2 shrink-0", TONE_CLASSES.amber.soft)}>
           <AlertTriangle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
           <div className="space-y-1 min-w-0">
             <div>暂时无法连接 HuggingFace（已尝试官方与镜像）。</div>
@@ -178,11 +188,19 @@ export default function BenchmarksPanel({
             {!isLoading && <span className="ml-1 opacity-70">({benchmarks.length})</span>}
           </div>
           {isLoading ? (
-            <Spinner />
+            <ListSkeleton rows={2} />
           ) : benchmarks.length === 0 ? (
-            <p className="text-xs text-muted-foreground leading-relaxed">
-              还没有加入任何数据集。搜索后点「加入项目」，或手动添加。加入后可关联到具体实验，供后续 AI 选用。
-            </p>
+            <EmptyState
+              variant="inline"
+              icon={<Database className="h-8 w-8" />}
+              title="还没有加入任何数据集"
+              subtitle="搜索后点「加入项目」,或直接手动录入。加入后可关联到具体实验,供后续 AI 选用。"
+              action={
+                <Button size="sm" variant="outline" onClick={() => setAdding(true)}>
+                  <Plus className="h-3.5 w-3.5" /> 手动添加
+                </Button>
+              }
+            />
           ) : (
             <div className="space-y-3">
               {sota.length > 0 && (
@@ -227,7 +245,7 @@ export default function BenchmarksPanel({
         onClose={() => setAdding(false)}
         onSaved={() => {
           setAdding(false);
-          qc.invalidateQueries({ queryKey: ["benchmarks", projectId] });
+          qc.invalidateQueries({ queryKey: qk.benchmarks.byProject(projectId) });
         }}
       />
 
@@ -236,6 +254,7 @@ export default function BenchmarksPanel({
         title="从项目移除"
         description={deleting ? `确定移除「${deleting.name}」？` : ""}
         confirmLabel="移除"
+        danger
         busy={delMutation.isPending}
         onConfirm={() => deleting && delMutation.mutate(deleting.id)}
         onCancel={() => setDeleting(null)}
@@ -301,18 +320,24 @@ function HitRow({
       </div>
       <div className="flex flex-wrap items-center gap-1.5">
         {experiments.length > 0 && (
-          <select
-            className="h-7 max-w-[9rem] rounded-md border border-input bg-background px-1.5 text-[11px]"
-            value={expId}
-            onChange={(e) => setExpId(e.target.value)}
-          >
-            <option value="">加入项目</option>
-            {experiments.map((e) => (
-              <option key={e.id} value={e.id}>
-                引入：{e.title}
-              </option>
-            ))}
-          </select>
+          // Select 内部容器是 w-full,套一层定宽 div 保持紧凑行内布局。
+          <div className="w-36 max-w-full shrink-0">
+            <Select
+              size="sm"
+              className="h-7 text-[11px]"
+              value={expId}
+              onChange={(e) => setExpId(e.target.value)}
+              aria-label="加入时关联实验"
+            >
+              <SelectOptions
+                placeholder="加入项目"
+                items={experiments.map((e) => ({
+                  value: e.id,
+                  label: `引入：${e.title}`,
+                }))}
+              />
+            </Select>
+          </div>
         )}
         <Button
           size="sm"
@@ -406,20 +431,22 @@ function Group({
                   </div>
                 )}
                 <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-                  <select
-                    className="h-6 max-w-full rounded border border-input bg-background px-1 text-[10px] text-muted-foreground"
-                    value={b.experiment_id || ""}
-                    onChange={(e) => onLink(b.id, e.target.value || null)}
-                  >
-                    <option value="">未关联实验</option>
-                    {experiments.map((e) => (
-                      <option key={e.id} value={e.id}>
-                        {e.title}
-                      </option>
-                    ))}
-                  </select>
+                  <div className="w-40 max-w-full">
+                    <Select
+                      size="sm"
+                      className="h-7 text-[11px] text-muted-foreground"
+                      value={b.experiment_id || ""}
+                      onChange={(e) => onLink(b.id, e.target.value || null)}
+                      aria-label="关联实验"
+                    >
+                      <SelectOptions
+                        placeholder="未关联实验"
+                        items={experiments.map((e) => ({ value: e.id, label: e.title }))}
+                      />
+                    </Select>
+                  </div>
                   {b.experiment_id && (
-                    <span className="text-[10px] text-blue-600 truncate max-w-[8rem]">
+                    <span className="text-[10px] text-primary truncate max-w-[8rem]">
                       → {expName(b.experiment_id)}
                     </span>
                   )}
@@ -485,7 +512,7 @@ function ManualBenchmarkDialog({
   const [isMainstream, setIsMainstream] = useState(false);
   const [experimentId, setExperimentId] = useState("");
 
-  const create = useMutation({
+  const create = useToastMutation({
     mutationFn: () =>
       api.createManualBenchmark(projectId, {
         name: name.trim(),
@@ -502,13 +529,13 @@ function ManualBenchmarkDialog({
         is_mainstream: isMainstream,
         experiment_id: experimentId || null,
       }),
+    successMessage: "已添加",
     onSuccess: () => {
       setName(""); setUrl(""); setMetricName(""); setMetricValue("");
       setDescription(""); setTagsRaw(""); setIsMainstream(false); setKind("dataset");
       setExperimentId("");
       onSaved();
     },
-    onError: (err) => showFriendlyError(err),
   });
 
   if (!open) return null;
@@ -522,15 +549,21 @@ function ManualBenchmarkDialog({
         <div className="space-y-3 mt-4">
           <Input placeholder="名称，如 ImageNet" value={name} onChange={(e) => setName(e.target.value)} />
           <div className="flex gap-2">
-            <select
-              className="h-9 rounded-md border border-input bg-background px-2 text-sm shrink-0"
-              value={kind}
-              onChange={(e) => setKind(e.target.value as "dataset" | "task" | "sota")}
-            >
-              <option value="dataset">数据集</option>
-              <option value="task">任务</option>
-              <option value="sota">公开最优指标</option>
-            </select>
+            <div className="w-36 shrink-0">
+              <Select
+                value={kind}
+                onChange={(e) => setKind(e.target.value as "dataset" | "task" | "sota")}
+                aria-label="类型"
+              >
+                <SelectOptions
+                  items={[
+                    { value: "dataset", label: "数据集" },
+                    { value: "task", label: "任务" },
+                    { value: "sota", label: "公开最优指标" },
+                  ]}
+                />
+              </Select>
+            </div>
             <Input placeholder="链接（可选）" value={url} onChange={(e) => setUrl(e.target.value)} className="flex-1 min-w-0" />
           </div>
           {kind === "sota" && (
@@ -551,16 +584,16 @@ function ManualBenchmarkDialog({
             onChange={(e) => setTagsRaw(e.target.value)}
           />
           {experiments.length > 0 && (
-            <select
-              className="h-9 w-full rounded-md border border-input bg-background px-2 text-sm"
+            <Select
               value={experimentId}
               onChange={(e) => setExperimentId(e.target.value)}
+              aria-label="关联实验"
             >
-              <option value="">不关联实验</option>
-              {experiments.map((e) => (
-                <option key={e.id} value={e.id}>{e.title}</option>
-              ))}
-            </select>
+              <SelectOptions
+                placeholder="不关联实验"
+                items={experiments.map((e) => ({ value: e.id, label: e.title }))}
+              />
+            </Select>
           )}
           <label className="flex items-center gap-2 text-xs text-muted-foreground cursor-pointer select-none">
             <input
@@ -574,7 +607,7 @@ function ManualBenchmarkDialog({
         </div>
         <div className="flex justify-end gap-2 pt-4 mt-4 border-t border-border">
           <Button variant="outline" onClick={onClose} disabled={create.isPending}>取消</Button>
-          <Button onClick={() => create.mutate()} disabled={!name.trim() || create.isPending}>
+          <Button onClick={() => create.mutate()} loading={create.isPending} disabled={!name.trim()}>
             {create.isPending ? "添加中…" : "添加"}
           </Button>
         </div>

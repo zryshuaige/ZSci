@@ -831,13 +831,17 @@ async def stage_8_report(ctx: StageContextLike, db: Session) -> StageResult:
 # state is the more accurate one for the user to confirm).
 
 def _merge(parts: list[StageResult], *, title: str, ai_judgement: str) -> StageResult:
-    summary: dict[str, Any] = {"title": title, "ai_judgement": ai_judgement}
+    summary: dict[str, Any] = {}
     outputs: dict[str, Any] = {}
     artifacts: list[dict[str, Any]] = []
     for p in parts:
         summary.update(p.summary)
         outputs.update(p.outputs_json)
         artifacts.extend(p.artifacts_json)
+    # 阶段级标题/结论最后写入:原子步骤的同名键不应覆盖掉确认卡上
+    # 展示的阶段标题(此前 "① 需求与基准" 会被 "Stage 1 — …" 顶掉)。
+    summary["title"] = title
+    summary["ai_judgement"] = ai_judgement
     return StageResult(summary=summary, outputs_json=outputs, artifacts_json=artifacts)
 
 

@@ -1,6 +1,7 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
-import { AlertTriangle, RotateCw, Home } from "lucide-react";
+import { AlertTriangle, RotateCw, Home } from "@/components/ui/icons";
 import { Link } from "react-router-dom";
+import { Button } from "./ui/Button";
 
 interface Props {
   children: ReactNode;
@@ -41,8 +42,8 @@ export default class ErrorBoundary extends Component<Props, State> {
       if (this.props.fallback) return this.props.fallback(this.state.error, this.reset);
       const err = this.state.error;
       return (
-        <div className="p-6 animate-fade-in">
-          <div className="max-w-xl mx-auto rounded-lg border border-destructive/40 bg-destructive/5 p-6 shadow-soft">
+        <div className="min-h-[70vh] flex items-center justify-center p-6 animate-fade-in">
+          <div className="max-w-xl w-full rounded-xl border border-destructive/40 bg-destructive/5 p-6 shadow-soft">
             <div className="flex items-start gap-3">
               <div className="rounded-full bg-destructive/10 p-2 shrink-0">
                 <AlertTriangle className="h-5 w-5 text-destructive" />
@@ -56,25 +57,20 @@ export default class ErrorBoundary extends Component<Props, State> {
                   <summary className="cursor-pointer text-muted-foreground hover:text-foreground">
                     错误详情
                   </summary>
-                  <pre className="mt-2 p-2 bg-muted rounded text-[11px] overflow-auto max-h-40 break-all">
+                  <pre className="mt-2 p-3 bg-muted/60 rounded-md text-[11px] overflow-auto max-h-40 break-all">
                     {err.message}
                     {"\n\n"}
                     {err.stack?.split("\n").slice(0, 5).join("\n")}
                   </pre>
                 </details>
                 <div className="mt-4 flex gap-2">
-                  <button
-                    type="button"
-                    onClick={this.reset}
-                    className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-3 py-1.5 text-sm hover:bg-muted transition-colors"
-                  >
+                  <Button variant="outline" size="sm" onClick={this.reset}>
                     <RotateCw className="h-3.5 w-3.5" /> 重试
-                  </button>
-                  <Link
-                    to="/"
-                    className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-3 py-1.5 text-sm hover:bg-muted transition-colors"
-                  >
-                    <Home className="h-3.5 w-3.5" /> 返回项目列表
+                  </Button>
+                  <Link to="/">
+                    <Button variant="outline" size="sm">
+                      <Home className="h-3.5 w-3.5" /> 返回项目列表
+                    </Button>
                   </Link>
                 </div>
               </div>

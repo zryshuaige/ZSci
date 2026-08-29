@@ -29,7 +29,7 @@ def test_404_not_found_envelope(client):
 def test_400_unknown_task_type_translates_to_skill_not_found(client, project):
     """A 400 with 'Unknown task type' in detail maps to SKILL_NOT_FOUND."""
     resp = client.post(
-        f"/api/v1/projects/{project['id']}/agent/tasks",
+        f"/api/v1/projects/{project['id']}/agent/tasks?sync=1",
         json={"task_type": "definitely_not_real", "input": {}},
     )
     assert resp.status_code == 400

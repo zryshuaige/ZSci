@@ -1,6 +1,7 @@
-import ReactECharts from "echarts-for-react";
+import ReactECharts from "./EChart";
 import { useMemo, useState } from "react";
 import type { Metric } from "@/lib/api";
+import { CHART_AXIS, CHART_GRID, CHART_SERIES } from "@/lib/chartTokens";
 
 /** Multi-series metric line chart (one series per metric_name) with a log/linear
  * toggle. Replaces the hand-rolled SVG chart so we get tooltip, dataZoom, and
@@ -28,14 +29,20 @@ export function MetricChart({ metrics }: { metrics: Metric[] }) {
     return {
       grid: { left: 56, right: 16, top: 16, bottom: 40 },
       tooltip: { trigger: "axis" },
-      legend: { bottom: 0, type: "scroll" as const, textStyle: { fontSize: 10 } },
-      xAxis: { type: "value" as const, name: "step", nameTextStyle: { fontSize: 10 } },
+      legend: { bottom: 0, type: "scroll" as const, textStyle: { fontSize: 10, color: CHART_AXIS } },
+      xAxis: {
+        type: "value" as const,
+        name: "step",
+        nameTextStyle: { fontSize: 10, color: CHART_AXIS },
+        axisLabel: { fontSize: 10, color: CHART_AXIS },
+      },
       yAxis: {
         type: useLog ? "log" : ("value" as const),
-        axisLabel: { fontSize: 10 },
+        axisLabel: { fontSize: 10, color: CHART_AXIS },
+        splitLine: { lineStyle: { color: CHART_GRID } },
       },
       dataZoom: [{ type: "inside" }, { type: "slider", height: 14, bottom: 22 }],
-      color: ["#2563eb", "#dc2626", "#16a34a", "#9333ea", "#ea580c", "#0891b2"],
+      color: CHART_SERIES,
       series,
     };
   }, [metrics, useLog]);
@@ -86,10 +93,20 @@ export function CompareChart({ runsMetrics }: { runsMetrics: { runId: string; me
       option: {
         grid: { left: 56, right: 16, top: 16, bottom: 48 },
         tooltip: { trigger: "axis" },
-        legend: { bottom: 0, type: "scroll", textStyle: { fontSize: 10 } },
-        xAxis: { type: "value", name: "step", nameTextStyle: { fontSize: 10 } },
-        yAxis: { type: useLog ? "log" : "value", axisLabel: { fontSize: 10 } },
+        legend: { bottom: 0, type: "scroll", textStyle: { fontSize: 10, color: CHART_AXIS } },
+        xAxis: {
+          type: "value",
+          name: "step",
+          nameTextStyle: { fontSize: 10, color: CHART_AXIS },
+          axisLabel: { fontSize: 10, color: CHART_AXIS },
+        },
+        yAxis: {
+          type: useLog ? "log" : "value",
+          axisLabel: { fontSize: 10, color: CHART_AXIS },
+          splitLine: { lineStyle: { color: CHART_GRID } },
+        },
         dataZoom: [{ type: "inside" }, { type: "slider", height: 14, bottom: 30 }],
+        color: CHART_SERIES,
         series,
       },
     };
@@ -115,27 +132,4 @@ export function CompareChart({ runsMetrics }: { runsMetrics: { runId: string; me
       )}
     </div>
   );
-}
-
-/** Grouped bar chart: the user's method vs SOTA, per metric/dataset. */
-export function SotaCompareChart({
-  points,
-}: {
-  points: { name: string; mine: number | null; sota: number | null; metricName?: string | null }[];
-}) {
-  const option = useMemo(() => ({
-    grid: { left: 56, right: 16, top: 24, bottom: 32 },
-    tooltip: { trigger: "axis" },
-    legend: { top: 0, textStyle: { fontSize: 10 } },
-    xAxis: { type: "category", data: points.map((p) => p.name), axisLabel: { fontSize: 10 } },
-    yAxis: { type: "value", axisLabel: { fontSize: 10 } },
-    series: [
-      { name: "我的方法", type: "bar", data: points.map((p) => p.mine), itemStyle: { color: "#2563eb" } },
-      { name: "SOTA", type: "bar", data: points.map((p) => p.sota), itemStyle: { color: "#dc2626" } },
-    ],
-  }), [points]);
-  if (points.length === 0) {
-    return <div className="text-xs text-muted-foreground py-8 text-center">暂无可对比的 SOTA 数据</div>;
-  }
-  return <ReactECharts option={option} style={{ height: 240, width: "100%" }} />;
 }

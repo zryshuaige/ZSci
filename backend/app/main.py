@@ -55,12 +55,11 @@ async def lifespan(app: FastAPI):  # noqa: ANN001
     from app.db.migrate import ensure_schema
 
     await asyncio.to_thread(ensure_schema, get_engine())
-    # Reap orphaned workflow state: any agent task / experiment run still marked
-    # "running" at startup is an orphan - the background orchestrator / subprocess
-    # died with the previous process. Mark them stopped so the global workflow
-    # sidebar doesn't list ghost tasks forever. (Single-process assumption; safe
-    # because there's no separate worker that might still be running them.)
-    await asyncio.to_thread(_reap_orphan_workflow_state)
+    # Reap orphaned workflow state: experiment-run subprocesses and generic
+    # jobs die with the previous process; tasks parked at a checkpoint are
+    # RESUMABLE and get their loops relaunched (R2.3).
+    resumable = await asyncio.to_thread(_reap_orphan_workflow_state)
+    await _resume_resumable_checkpoints(resumable)
     # M32: start the in-process task reconciler. The orchestrator stores
     # `AgentTask.error` on the "happy path" failure handler, but if its
     # asyncio task gets silently dropped (event-loop cancellation, unhandled
@@ -332,35 +331,124 @@ def _reap_orphan_stage_rows(db) -> None:
             )
 
 
-def _reap_orphan_workflow_state() -> None:
-    """Mark in-flight tasks/runs as stopped on startup (they can't still be running)."""
-    from sqlalchemy import update
+def _reap_orphan_workflow_state() -> list[str]:
+    """Startup recovery: reconcile in-flight state with the dead process.
 
-    from app.db.models import AgentTask, ExperimentRun, Job
+    Returns the ids of tasks whose checkpoints survive the restart (the
+    caller relaunches their loops on the event loop — this function runs
+    in a worker thread where no loop exists).
+
+    Principles:
+    - Subprocesses (experiment runs) and generic jobs cannot survive the
+      process → mark stopped.
+    - A task blocked at a checkpoint (awaiting_approval, or running with a
+      pending Approval) is NOT lost — the loop is relaunched; it adopts the
+      pending checkpoint and waits again (R2.3 resumable checkpoints).
+    - A task that died mid-execution → stopped + its current phase failed
+      with a friendly recovery message; the user retries from the UI and
+      the loop resumes from the first non-completed phase.
+    - Backfill agent_tasks.experiment_id from input_json (pre-column rows).
+    """
+    import json
+
+    from sqlalchemy import select, update
+
+    from app.db.models import AgentTask, Approval, Experiment, ExperimentRun, ExperimentStage, Job
     from app.db.session import get_sessionmaker
 
+    resumable_task_ids: list[str] = []
     try:
         with get_sessionmaker()() as db:
-            db.execute(
-                update(AgentTask)
-                .where(AgentTask.status.in_(("running", "pending", "planning")))
-                .values(status="stopped", error="进程重启,任务中断")
-            )
+            # --- 1. backfill experiment_id from input_json (legacy rows) ---
+            for t in db.scalars(
+                select(AgentTask).where(
+                    AgentTask.experiment_id.is_(None),
+                    AgentTask.task_type == "experiment.autonomous_run",
+                )
+            ).all():
+                try:
+                    inp = json.loads(t.input_json) if t.input_json else {}
+                except (ValueError, TypeError):
+                    continue
+                if isinstance(inp, dict) and inp.get("experiment_id"):
+                    t.experiment_id = inp["experiment_id"]
+
+            # --- 2. subprocesses / jobs can't survive; stop them ---
             db.execute(
                 update(ExperimentRun)
                 .where(ExperimentRun.status == "running")
                 .values(status="stopped")
             )
-            # Jobs too - a background LaTeX compile dies with the process.
             db.execute(
                 update(Job)
                 .where(Job.status == "running")
                 .values(status="stopped", error="进程重启,任务中断")
             )
+
+            # --- 3. agent tasks: resume-or-recover ---
+            in_flight = db.scalars(
+                select(AgentTask).where(
+                    AgentTask.status.in_(("running", "pending", "planning", "awaiting_approval"))
+                )
+            ).all()
+            for t in in_flight:
+                pending = db.scalar(
+                    select(Approval).where(
+                        Approval.task_id == t.id, Approval.status == "pending"
+                    )
+                )
+                if pending is not None:
+                    # Checkpoint survives the restart — keep the task alive.
+                    t.status = "awaiting_approval"
+                    resumable_task_ids.append(t.id)
+                    continue
+                # Died mid-execution.
+                t.status = "stopped"
+                t.error = "进程重启,任务中断。你可以在原页面重试,已完成阶段会被保留。"
+                exp_id = t.experiment_id
+                if exp_id:
+                    exp = db.get(Experiment, exp_id)
+                    if exp is not None and exp.overall_status in (
+                        "running", "waiting_user", "draft",
+                    ):
+                        exp.overall_status = "failed"
+                    if exp is not None and exp.current_stage:
+                        stage = db.scalar(
+                            select(ExperimentStage).where(
+                                ExperimentStage.experiment_id == exp_id,
+                                ExperimentStage.stage_key == exp.current_stage,
+                            )
+                        )
+                        if stage is not None and stage.status in (
+                            "running", "waiting_for_user", "draft",
+                        ):
+                            stage.status = "failed"
             db.commit()
     except Exception:  # noqa: BLE001
         # Startup must not fail on cleanup - the app is still usable without it.
-        pass
+        import logging
+        logging.getLogger("zsci.main").exception("startup recovery failed")
+    return resumable_task_ids
+
+
+async def _resume_resumable_checkpoints(task_ids: list[str]) -> None:
+    """Relaunch experiment loops for tasks whose checkpoints survived the
+    restart. Runs ON the event loop (lifespan) so dispatch can create tasks."""
+    if not task_ids:
+        return
+    from app.db.models import AgentTask
+    from app.db.session import get_sessionmaker
+    from app.experiments.orchestrator import relaunch_experiment_loop
+
+    try:
+        with get_sessionmaker()() as db:
+            for tid in task_ids:
+                t = db.get(AgentTask, tid)
+                if t is not None and t.task_type == "experiment.autonomous_run":
+                    relaunch_experiment_loop(t)
+    except Exception:  # noqa: BLE001
+        import logging
+        logging.getLogger("zsci.main").exception("checkpoint resume failed")
 
 
 def create_app() -> FastAPI:

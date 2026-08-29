@@ -139,7 +139,7 @@ def test_active_workflows_lists_running_run(client, project, db_session):
 
 def test_create_task_unknown_type_rejected(client, project):
     resp = client.post(
-        f"/api/v1/projects/{project['id']}/agent/tasks",
+        f"/api/v1/projects/{project['id']}/agent/tasks?sync=1",
         json={"task_type": "no.such.skill", "input": {}},
     )
     assert resp.status_code == 400
@@ -163,7 +163,7 @@ def test_trend_analysis_task_completes_with_stub_llm(client, project):
 
     with _patch_gateway(_Stub()):
         resp = client.post(
-            f"/api/v1/projects/{project['id']}/agent/tasks",
+            f"/api/v1/projects/{project['id']}/agent/tasks?sync=1",
             json={"task_type": "research.trend_analysis", "input": {"user_request": "test"}},
         )
     assert resp.status_code == 200, resp.text
@@ -183,7 +183,7 @@ def test_task_with_unconfigured_llm_returns_503(client, project):
     """
     # Default test config has no models, so get_gateway returns an empty config.
     resp = client.post(
-        f"/api/v1/projects/{project['id']}/agent/tasks",
+        f"/api/v1/projects/{project['id']}/agent/tasks?sync=1",
         json={"task_type": "research.trend_analysis", "input": {"user_request": "x"}},
     )
     assert resp.status_code == 503, resp.text
@@ -214,7 +214,7 @@ def test_approve_with_no_pending_approval_404(client, project):
 
     with _patch_gateway(_Stub()):
         task = client.post(
-            f"/api/v1/projects/{project['id']}/agent/tasks",
+            f"/api/v1/projects/{project['id']}/agent/tasks?sync=1",
             json={"task_type": "research.trend_analysis", "input": {}},
         ).json()
     # The task completed without requesting approval, so there's nothing pending.
@@ -232,7 +232,7 @@ def test_list_approvals_empty_for_completed_task(client, project):
 
     with _patch_gateway(_Stub()):
         task = client.post(
-            f"/api/v1/projects/{project['id']}/agent/tasks",
+            f"/api/v1/projects/{project['id']}/agent/tasks?sync=1",
             json={"task_type": "research.trend_analysis", "input": {}},
         ).json()
     approvals = client.get(f"/api/v1/agent/tasks/{task['id']}/approvals").json()
@@ -251,7 +251,7 @@ def test_gateway_error_returns_502_not_500(client, project):
 
     with _patch_gateway(_Broken()):
         resp = client.post(
-            f"/api/v1/projects/{project['id']}/agent/tasks",
+            f"/api/v1/projects/{project['id']}/agent/tasks?sync=1",
             json={"task_type": "research.trend_analysis", "input": {}},
         )
     assert resp.status_code == 502, resp.text

@@ -192,13 +192,13 @@ def generate_hypothesis_candidates(
 ) -> ResearchAgentState:
     """Generate 3-5 DIFFERENTIATED research directions as candidates.
 
-    Returns:  state['result'] = { candidates: [ ...dicts... ] }
+    Returns:  state['result'] = { candidates, persisted_ids }
 
-    IMPORTANT: this skill does NOT persist Idea rows. The Multi-Idea
-    candidate-comparison page (Phase B: ExploreIdeasPage) shows the LLM
-    output to the user, then `POST /ideas/bulk` is called with the chosen
-    entries. This is the "generate first, persist after user picks" flow
-    that replaces the old auto-insert-then-show behaviour.
+    Candidates are PERSISTED immediately as Idea rows with
+    status="candidate" (durable across navigation/restarts; adopting one
+    promotes it to "hypothesis"). The candidate-comparison page reads them
+    from the ideas list instead of a volatile cache, so revisiting the
+    flow never re-runs the LLM.
     """
     pack, evidence = _build_evidence_pack(
         db, state.get("selected_papers", []), state["project_id"]
@@ -267,9 +267,53 @@ def generate_hypothesis_candidates(
 
     merged_evidence = evidence + parsed.get("evidence", [])
     state["evidence"] = validate_evidence(merged_evidence)
-    state["result"] = {"candidates": candidates, "raw": raw[:2000]}
+
+    # Persist candidates as Idea rows with status="candidate". This makes the
+    # exploration flow durable: navigating away and back shows the SAME
+    # candidates from the DB instead of re-running the LLM (which previously
+    # burned tokens on every revisit — the candidates only lived in a 60s
+    # query cache). Adopting a candidate promotes it to status="hypothesis";
+    # untouched candidates stay visible on the ideas page for later.
+    from app.db.models import Idea
+    from app.utils import new_id
+
+    persisted_ids: list[str] = []
+    for c in candidates:
+        row = Idea(
+            id=new_id("idea"),
+            project_id=state["project_id"],
+            title=c["name"],
+            hypothesis=c["hypothesis"],
+            motivation=c["motivation"],
+            status="candidate",
+            content=json.dumps(
+                {
+                    "one_liner": c["one_liner"],
+                    "feasibility": c["feasibility"],
+                    "novelty": c["novelty"],
+                    "est_cost": c["est_cost"],
+                    "est_days": c["est_days"],
+                    "recommended": c["recommended"],
+                    "targets": c["targets"],
+                    "baseline_methods": c["baseline_methods"],
+                    "key_differences": c["key_differences"],
+                    "evidence_paper_ids": c["evidence_paper_ids"],
+                },
+                ensure_ascii=False,
+            ),
+        )
+        db.add(row)
+        persisted_ids.append(row.id)
+    db.flush()
+
+    state["result"] = {
+        "candidates": candidates,
+        "persisted_ids": persisted_ids,
+        "raw": raw[:2000],
+    }
     state["final_response"] = (
-        f"生成了 {len(candidates)} 个研究方向候选(用户将从中选择)。"
+        f"生成了 {len(candidates)} 个研究想法候选，已存入研究想法库（标记为「候选」），"
+        "可随时回到想法页继续挑选，无需重新生成。"
     )
     return state
 

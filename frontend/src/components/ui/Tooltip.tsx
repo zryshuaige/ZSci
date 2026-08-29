@@ -218,6 +218,3 @@ export function ShortcutTooltip({
 }
 
 /** Span wrapper used when a tooltip child cannot accept a ref directly. */
-export const TooltipAnchor = (props: HTMLAttributes<HTMLSpanElement>) => (
-  <span className="inline-flex" {...props} />
-);

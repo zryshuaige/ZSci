@@ -1,6 +1,8 @@
 import { type ReactNode } from "react";
+import { Loader2 } from "@/components/ui/icons";
 import { cn } from "@/lib/cn";
 import { Button } from "./Button";
+import { Modal } from "./Modal";
 
 interface ConfirmDialogProps {
   open: boolean;
@@ -11,12 +13,16 @@ interface ConfirmDialogProps {
   onConfirm: () => void;
   onCancel: () => void;
   busy?: boolean;
+  /** Destructive action styling (delete / abort): red confirm button. */
+  danger?: boolean;
 }
 
-/** Lightweight approval dialog (design.md §16.1) used for PDF downloads.
-   Materialize, don't just fade: scrim blurs in while the panel pops
-   (scale 0.96 -> 1 + opacity), so the surface reads as arriving rather
-   than appearing. Modal is exempt from origin-anchoring (stays centered). */
+/** Yes/no confirmation dialog. Composes `Modal` (./Modal) for the chrome —
+ *  portal, Esc + backdrop cancel (unless busy), autofocus — and only adds
+ *  the cancel/confirm button pair. No `onSubmit` is passed, so the content
+ *  is NOT wrapped in a <form> (there are no inputs to submit). Cancel stays
+ *  first in DOM order with autoFocus so the safe action is the focused one.
+ *  For dialogs containing form inputs, use `Modal` directly. */
 export function ConfirmDialog({
   open,
   title,
@@ -26,33 +32,45 @@ export function ConfirmDialog({
   onConfirm,
   onCancel,
   busy,
+  danger,
 }: ConfirmDialogProps) {
-  if (!open) return null;
   return (
-    <div className="fixed inset-0 z-modal flex items-center justify-center bg-black/40 backdrop-blur-sm animate-fade-in">
-      <div className="w-full max-w-md rounded-lg bg-card p-5 shadow-float animate-pop">
-        <h3 className="text-lg font-semibold">{title}</h3>
-        {description && <div className="mt-2 text-sm text-muted-foreground">{description}</div>}
-        <div className="mt-5 flex justify-end gap-2">
-          <Button variant="outline" onClick={onCancel} disabled={busy}>
+    <Modal
+      open={open}
+      onClose={onCancel}
+      title={title}
+      description={description}
+      busy={busy}
+      footer={
+        <>
+          <Button variant="outline" onClick={onCancel} disabled={busy} autoFocus>
             {cancelLabel}
           </Button>
-          <Button onClick={onConfirm} disabled={busy}>
-            {busy ? "处理中…" : confirmLabel}
+          <Button
+            onClick={onConfirm}
+            disabled={busy}
+            variant={danger ? "destructive" : "default"}
+          >
+            {busy ? (
+              <span className="inline-flex items-center gap-2">
+                <Spinner className="h-3.5 w-3.5" /> 处理中…
+              </span>
+            ) : (
+              confirmLabel
+            )}
           </Button>
-        </div>
-      </div>
-    </div>
+        </>
+      }
+    >
+      {null}
+    </Modal>
   );
 }
 
 export function Spinner({ className }: { className?: string }) {
   return (
-    <div
-      className={cn(
-        "h-5 w-5 animate-spin rounded-full border-2 border-muted border-t-primary",
-        className
-      )}
+    <Loader2
+      className={cn("h-5 w-5 animate-spin text-primary", className)}
     />
   );
 }

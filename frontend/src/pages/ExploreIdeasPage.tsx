@@ -1,28 +1,64 @@
-// Phase B: 多候选研究方向对比屏。
+// Phase B: 候选研究想法对比屏。
 //
-// Route: /explore/:projectId/ideas?idea=...
-// 行为:
-//   1. 用相同 query key 复用 /explore/:id/new 已经在 query cache 写下的候选列表
-//      (避免重复触发 LLM);若无则重新调一次 generateIdeaCandidates。
-//   2. 让用户勾选 ≥1 个候选 + 「让 AI 再生成一批方向」可重新拉。
-//   3. 用户选完点「确认采纳」 → POST /ideas/bulk 入库;
-//      接着 POST /projects/{id}/experiments 自动建一个 draft 实验填 RQ +
-//      hypothesis → 跳 /experiments/:expId/preview(Phase C 研究计划确认)。
+// Route: /projects/:projectId/explore/ideas
+// 数据源（关键设计）: 候选**持久化在 ideas 表**（status="candidate"，由
+// 后端 generate_hypothesis_candidates skill 直接写入）。因此：
+//   - 切走再回来、甚至刷新页面，看到的都是同一批候选 —— 不再重新跑
+//     LLM（此前候选只活在前端 60s query cache 里，每次回访都烧一次 token）；
+//   - 采纳 = 把选中候选升级为 status="hypothesis" + 以首个方向创建实验，
+//     单次事务性操作（不再有 bulk 插入 + 建实验的两段写）；
+//   - 未采纳的候选保留在想法页，随时可以回来继续挑或手动删除。
 
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { RefreshCw, Sparkles, ArrowRight, Loader2 } from "lucide-react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { RefreshCw, Sparkles, ArrowRight, Loader2, AlertTriangle, RotateCw, Info } from "@/components/ui/icons";
 import {
   api,
+  qk,
   type Idea,
   type MultiIdeaCandidate,
-} from "@/lib/api";
-import { showFriendlyError } from "@/lib/useFriendlyError";
+} from "@/api";
+import { useToastMutation } from "@/lib/hooks/useToastMutation";
 import { Card } from "@/components/ui/Card";
+import { PageHeader } from "@/components/ui/PageHeader";
 import { Button } from "@/components/ui/Button";
 import { Spinner } from "@/components/ui/Dialog";
+import { EmptyState } from "@/components/ui/EmptyState";
 import { MultiIdeaCard } from "@/components/explore/MultiIdeaCard";
+import WizardBar from "@/components/WizardBar";
+
+/** 把库内的候选 Idea 行映射为对比卡需要的多候选结构。 */
+function ideaToCandidate(row: Idea): MultiIdeaCandidate {
+  let content: Record<string, unknown> = {};
+  try {
+    const parsed: unknown = row.content ? JSON.parse(row.content) : {};
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      content = parsed as Record<string, unknown>;
+    }
+  } catch {
+    content = {};
+  }
+  const strList = (v: unknown): string[] =>
+    Array.isArray(v) ? v.map((x) => String(x)) : [];
+  const num = (v: unknown, d: number): number =>
+    typeof v === "number" ? v : d;
+  return {
+    name: row.title || "(未命名)",
+    hypothesis: row.hypothesis || "",
+    motivation: row.motivation || "",
+    one_liner: typeof content.one_liner === "string" ? content.one_liner : "",
+    feasibility: num(content.feasibility, 2),
+    novelty: num(content.novelty, 2),
+    est_cost: typeof content.est_cost === "string" ? content.est_cost : "medium",
+    est_days: num(content.est_days, 3),
+    recommended: content.recommended === true,
+    targets: strList(content.targets),
+    baseline_methods: strList(content.baseline_methods),
+    key_differences: strList(content.key_differences),
+    evidence_paper_ids: strList(content.evidence_paper_ids),
+  };
+}
 
 export default function ExploreIdeasPage() {
   const { projectId } = useParams<{ projectId: string }>();
@@ -31,134 +67,99 @@ export default function ExploreIdeasPage() {
   const navigate = useNavigate();
   const qc = useQueryClient();
 
-  // Selected candidate indexes (allow multi-select; backend bulk_insert
-  // accepts N). The candidate comparison page defaults to single-select
-  // visually (one card highlighted at a time), but `selected` is a Set
-  // so adding/removing is constant time.
-  const [selected, setSelected] = useState<Set<number>>(new Set());
+  // Selected candidate ids（库内 Idea id，稳定持久）。
+  const [selected, setSelected] = useState<Set<string>>(new Set());
 
-  // The candidates, fetched via the same query key as the understanding page.
-  // Cached data from `useQuery` is returned synchronously on first render so
-  // there's no double-LLM call when the user accepts on /new.
-  const candidatesQuery = useQuery<MultiIdeaCandidate[]>({
-    queryKey: ["explore", "candidates", projectId, ideaText],
-    queryFn: async () => {
-      const task = await api.generateIdeaCandidates(projectId!, ideaText.trim());
-      let parsed: { candidates?: MultiIdeaCandidate[] } = {};
-      try {
-        parsed = task.result_json ? JSON.parse(task.result_json) : {};
-      } catch {
-        parsed = {};
-      }
-      return parsed.candidates ?? [];
-    },
-    enabled: !!projectId && !!ideaText.trim(),
-    staleTime: 60_000,
+  // 数据源：项目想法列表中的「候选」状态行（与想法页/侧栏共享缓存）。
+  const ideasQuery = useQuery({
+    queryKey: qk.ideas.byProject(projectId!),
+    queryFn: () => api.listIdeas(projectId!),
+    enabled: !!projectId,
   });
+  const candidates = useMemo(
+    () => (ideasQuery.data ?? []).filter((r) => r.status === "candidate"),
+    [ideasQuery.data],
+  );
 
-  // If there's a "recommended" candidate in the loaded list, default-select
-  // it on first render. Anything other than the first one's recommendation
-  // is left for the user.
+  // 推荐项默认勾选（仅在用户还没交互时）。
   useEffect(() => {
-    if (!candidatesQuery.data || selected.size > 0) return;
-    const idx = candidatesQuery.data.findIndex((c) => c.recommended);
-    if (idx >= 0) {
-      setSelected(new Set([idx]));
-    }
-  }, [candidatesQuery.data]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (!ideasQuery.data || selected.size > 0) return;
+    const first = candidates.find((c) => {
+      try {
+        return JSON.parse(c.content || "{}")?.recommended === true;
+      } catch {
+        return false;
+      }
+    });
+    if (first) setSelected(new Set([first.id]));
+  }, [ideasQuery.data]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const candidates = candidatesQuery.data ?? [];
-
-  const toggle = (idx: number) => {
+  const toggle = (id: string) => {
     setSelected((prev) => {
       const next = new Set(prev);
-      if (next.has(idx)) next.delete(idx);
-      else next.add(idx);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
       return next;
     });
   };
 
-  const regenerate = useMutation({
+  // 重新整理 = 让 LLM 再生成一批（后端会作为新候选入库）。
+  const regenerate = useToastMutation({
     mutationFn: () =>
-      api.generateIdeaCandidates(projectId!, ideaText.trim()),
+      api.generateIdeaCandidates(
+        projectId!,
+        ideaText.trim() || candidates[0]?.hypothesis || "",
+      ),
     onSuccess: () => {
-      candidatesQuery.refetch();
+      qc.invalidateQueries({ queryKey: qk.ideas.byProject(projectId!) });
       setSelected(new Set());
     },
-    onError: (err) => showFriendlyError(err),
+    // onError 默认走 toast(禁止静默失败)。
   });
 
-  // Adopt selected candidates: bulk-insert Ideas, then create one Experiment
-  // with the FIRST candidate's hypothesis as the research_question, then
-  // navigate to the preview-plan page.
-  const adoptMutation = useMutation({
+  // 采纳：选中候选升级为「待验证」+ 以第一个方向创建实验 → 计划确认页。
+  const adoptMutation = useToastMutation({
     mutationFn: async () => {
-      const chosen = candidates.filter((_, i) => selected.has(i));
+      const chosen = candidates.filter((c) => selected.has(c.id));
       if (chosen.length === 0) throw new Error("请选择至少一个值得继续的方向");
 
       const lead = chosen[0];
-      const rqDraft = (lead.hypothesis || lead.one_liner || ideaText || "").trim();
+      const rqDraft = (lead.hypothesis || lead.motivation || lead.title || "").trim();
       if (!rqDraft) {
-        // Don't even hit the server — backend will 422 anyway, but
-        // surfacing the message client-side avoids a round trip and
-        // lets the user pick a candidate that has a hypothesis.
-        throw new Error("请先选择研究方向或填写原始想法");
+        throw new Error("请先选择带假设的研究想法，或先在想法页补充假设");
       }
 
-      const bulkResp = await api.bulkInsertIdeas(projectId!, {
-        ideas: chosen.map((c) => ({
-          title: c.name,
-          hypothesis: c.hypothesis,
-          motivation: `${c.motivation}\n\n研究方向候选\none_liner:${c.one_liner}\n可行性:${c.feasibility}/3  创新性:${c.novelty}/3`.trim(),
-          status: "hypothesis",
-          // content is a dict (object) per the backend BulkIdeaIn contract;
-          // the router json.dumps() it into the TEXT column. Sending a
-          // pre-serialized string is rejected with INPUT_INVALID.
-          content: {
-            feasibility: c.feasibility,
-            novelty: c.novelty,
-            est_cost: c.est_cost,
-            est_days: c.est_days,
-            targets: c.targets,
-            baseline_methods: c.baseline_methods,
-            key_differences: c.key_differences,
-            evidence_paper_ids: c.evidence_paper_ids,
-          },
-        })),
-      });
-      const inserted: Idea[] = bulkResp.inserted;
-
-      // Build the experiment: title + RQ + hypothesis from candidate[0].
+      // 1) 升级状态：candidate → hypothesis（未选中的候选保持 candidate）。
+      for (const c of chosen) {
+        await api.updateIdea(c.id, { status: "hypothesis" });
+      }
+      // 2) 创建实验（首选项）。
       const expResp = await api.createExperiment(projectId!, {
-        title: lead.name,
+        title: lead.title || "未命名实验",
         research_question: rqDraft,
-        hypothesis: lead.motivation || lead.one_liner || "",
-        related_idea_id: inserted[0]?.id || undefined,
+        hypothesis: (lead.motivation || "").trim() || undefined,
+        related_idea_id: lead.id,
       });
-      return { experiment: expResp, insertedCount: inserted.length };
+      return { experiment: expResp, adoptedCount: chosen.length };
     },
     onSuccess: ({ experiment }) => {
-      qc.invalidateQueries({ queryKey: ["ideas", projectId] });
-      qc.invalidateQueries({ queryKey: ["experiments", projectId] });
-      // Phase C: jump to the preview-plan page (next implement step).
-      navigate(`/experiments/${experiment.id}/preview`);
+      qc.invalidateQueries({ queryKey: qk.ideas.byProject(projectId!) });
+      qc.invalidateQueries({ queryKey: qk.experiments.byProject(projectId!) });
+      navigate(`/projects/${projectId}/experiments/${experiment.id}/preview`);
     },
-    onError: (err) => showFriendlyError(err),
+    // onError 默认走 toast —— 采纳失败(含客户端校验抛错)必有反馈。
   });
 
   const goBack = () => {
-    if (!ideaText) {
-      navigate("/");
-      return;
-    }
-    const params = new URLSearchParams({ idea: ideaText });
-    navigate(`/explore/${projectId}/new?${params.toString()}`);
+    const params = ideaText ? `?idea=${encodeURIComponent(ideaText)}` : "";
+    navigate(`/projects/${projectId}/explore/new${params}`);
   };
 
   const hasCandidates = candidates.length > 0;
 
   return (
     <div className="p-8 max-w-5xl mx-auto space-y-5">
+      <WizardBar projectId={projectId!} current={2} />
       {/* Header */}
       <div className="space-y-1">
         <button
@@ -168,50 +169,74 @@ export default function ExploreIdeasPage() {
         >
           ← 返回研究问题概述
         </button>
-        <h1 className="text-xl font-semibold tracking-tight">
-          候选研究方向 {hasCandidates && <span>({candidates.length})</span>}
-        </h1>
-        <p className="text-xs text-muted-foreground leading-relaxed">
-          以下方向根据 "{ideaText.slice(0, 30)}{ideaText.length > 30 ? "…" : ""}" 整理。请选择一个或多个值得进一步验证的方向,然后进入首轮计划;若结果不合适,可调整描述或重新生成。
-        </p>
+        <PageHeader
+          title={`候选研究想法${hasCandidates ? ` (${candidates.length})` : ""}`}
+          subtitle="以下候选已保存到本项目的研究想法库，随时可以离开再回来继续挑选，不会丢失、也不会重复生成。选中后进入首轮计划。"
+        />
       </div>
 
-      {/* Loading / empty / error */}
-      {candidatesQuery.isLoading && (
-        <Card className="p-6 flex items-center gap-3 text-sm text-muted-foreground">
-          <Spinner /> 正在整理候选研究方向……
-        </Card>
+      {/* 持久化提示条：让用户明确知道「这些候选不会丢」。 */}
+      {hasCandidates && (
+        <div className="flex items-center gap-2 rounded-lg border border-blue-200 bg-blue-50/60 px-3 py-2 text-xs text-blue-800">
+          <Info className="h-3.5 w-3.5 shrink-0" />
+          这些候选已保存在「研究想法」页（状态：候选）。采纳后状态变为「待验证」；未采纳的会保留，不会重复消耗生成次数。
+        </div>
       )}
-      {!candidatesQuery.isLoading && !hasCandidates && (
+
+      {/* 三态分离:骨架 / 错误卡(可重试)/ 空态(可重新生成)/ 列表。 */}
+      {ideasQuery.isLoading ? (
+        <Card className="p-6 flex items-center gap-3 text-sm text-muted-foreground">
+          <Spinner /> 正在读取已保存的候选……
+        </Card>
+      ) : ideasQuery.isError ? (
         <Card className="p-6 text-center">
-          <Sparkles className="h-6 w-6 text-primary mx-auto mb-2" />
-          <p className="text-sm text-muted-foreground">
-            这一轮没有整理出候选方向,可以尝试调整描述或重新生成。
-          </p>
+          <AlertTriangle className="mx-auto h-6 w-6 text-destructive/70" />
+          <div className="mt-2 text-sm text-muted-foreground">候选列表加载失败</div>
           <Button
             size="sm"
             variant="outline"
             className="mt-3"
-            onClick={() => regenerate.mutate()}
-            disabled={regenerate.isPending}
+            onClick={() => ideasQuery.refetch()}
+            loading={ideasQuery.isFetching}
           >
-            <RefreshCw className="h-4 w-4" /> 重新整理
+            <RotateCw className="h-3.5 w-3.5" /> 重试
           </Button>
         </Card>
-      )}
-
-      {/* Cards grid */}
-      {hasCandidates && (
+      ) : !hasCandidates ? (
+        <EmptyState
+          icon={<Sparkles className="h-8 w-8 text-primary" />}
+          title="还没有已保存的候选"
+          subtitle="让系统根据你的描述整理一批候选（会保存到研究想法库）；生成一次即可反复挑选。"
+          action={
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => regenerate.mutate()}
+              loading={regenerate.isPending}
+            >
+              <RefreshCw className="h-4 w-4" /> 生成一批候选
+            </Button>
+          }
+        />
+      ) : (
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-          {candidates.map((c, idx) => (
-            <MultiIdeaCard
-              key={`${c.name}-${idx}`}
-              candidate={c}
-              selected={selected.has(idx)}
-              onSelect={() => toggle(idx)}
-              busy={adoptMutation.isPending}
-            />
-          ))}
+          {candidates.map((row, idx) => {
+            const c = ideaToCandidate(row);
+            return (
+              <div
+                key={row.id}
+                style={{ animationDelay: `${idx * 60}ms` }}
+                className="animate-slide-up"
+              >
+                <MultiIdeaCard
+                  candidate={c}
+                  selected={selected.has(row.id)}
+                  onSelect={() => toggle(row.id)}
+                  busy={adoptMutation.isPending}
+                />
+              </div>
+            );
+          })}
         </div>
       )}
 
@@ -228,12 +253,13 @@ export default function ExploreIdeasPage() {
           ) : (
             <RefreshCw className="h-4 w-4" />
           )}
-          重新整理候选方向
+          再生成一批（现有候选保留）
         </Button>
         <Button
           size="lg"
           onClick={() => adoptMutation.mutate()}
           disabled={selected.size === 0 || adoptMutation.isPending}
+          title={selected.size > 1 ? "将全部选中项标记为待验证，并以第一个方向创建实验" : undefined}
         >
           {adoptMutation.isPending ? (
             <Loader2 className="h-4 w-4 animate-spin" />
@@ -243,6 +269,11 @@ export default function ExploreIdeasPage() {
           确认并拟定首轮计划{selected.size > 0 ? `(${selected.size} 个)` : ""}
         </Button>
       </div>
+      {selected.size > 1 && (
+        <p className="text-[11px] text-muted-foreground text-right -mt-3">
+          将把 {selected.size} 个选中项标记为「待验证」，并以第一个方向创建实验进入计划确认。
+        </p>
+      )}
     </div>
   );
 }

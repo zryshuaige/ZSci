@@ -5,7 +5,7 @@ import { useState } from "react";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Textarea } from "@/components/ui/Input";
-import { ClipboardList, Pencil, Check } from "lucide-react";
+import { ClipboardList, Pencil, Check } from "@/components/ui/icons";
 
 interface AIUnderstandingCardProps {
   original: string;
@@ -106,7 +106,7 @@ export function AIUnderstandingCard({
         </div>
       ) : (
         <div className="flex items-center gap-2 pt-2 border-t border-border/60">
-          <Button onClick={onAccept} disabled={busy}>
+          <Button onClick={onAccept} disabled={busy || !revisedText.trim()}>
             <Check className="h-4 w-4" />
             概述准确,继续
           </Button>
@@ -121,18 +121,21 @@ export function AIUnderstandingCard({
 }
 
 /** Derive a short research-problem summary from the leading candidate.
- *  Pure function so unit tests don't need to render. */
+ *  Pure function so unit tests don't need to render. `originalText` 是用户的
+ *  原始描述 —— 为空时诚实引导去填写,而不是谎称「已记录你的方向」。 */
 export function summariseCandidate(
   candidate: {
     hypothesis: string;
     motivation: string;
     one_liner?: string;
   } | null | undefined,
+  originalText = "",
 ): { understanding: string; goal: string | null; familiarity: string | null } {
   if (!candidate) {
     return {
-      understanding:
-        "系统已记录你描述的研究方向,接下来会据此整理若干差异化的候选方向供你挑选。",
+      understanding: originalText.trim()
+        ? "系统将基于你描述的方向生成若干候选研究方向。"
+        : "还没有研究描述。点「修改描述」写下你想研究的方向,系统会据此整理差异化的候选方向供你挑选。",
       goal: null,
       familiarity: null,
     };

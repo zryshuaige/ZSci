@@ -1,6 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
-import { AlertTriangle, RefreshCw } from "lucide-react";
+import { AlertTriangle, RefreshCw } from "@/components/ui/icons";
 import { api } from "@/lib/api";
+import { cn } from "@/lib/cn";
+import { TONE_CLASSES } from "@/lib/statusMeta";
 
 /**
  * Persistent banner that surfaces a degraded / unreachable backend.
@@ -49,7 +51,7 @@ export default function BackendHealthBanner() {
   }
   if (data && data.status === "degraded") {
     return (
-      <div className="bg-amber-100 text-amber-900 text-xs px-4 py-1.5 flex items-center gap-2 z-toast relative border-b border-amber-300">
+      <div className={cn("text-xs px-4 py-1.5 flex items-center gap-2 z-toast relative border-b", TONE_CLASSES.amber.soft)}>
         <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
         <span className="flex-1">
           后端处于降级状态:数据库读写异常 — {data.db_error || "请检查 SQLite 文件"}

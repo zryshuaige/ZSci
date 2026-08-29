@@ -1,6 +1,7 @@
-import { Check, Pencil, SkipForward, Square, GitBranch, RotateCcw, Play, Clock } from "lucide-react";
+import { Check, Pencil, SkipForward, Square, GitBranch, RotateCcw, Play, Clock } from "@/components/ui/icons";
 import { cn } from "@/lib/cn";
 import { fmtTime } from "@/lib/api";
+import { TONE_CLASSES, type Tone } from "@/lib/statusMeta";
 
 interface DecisionHistoryProps {
   /** The experiment's `decision_history` array (already JSON-decoded by the
@@ -9,14 +10,14 @@ interface DecisionHistoryProps {
   history: Array<Record<string, unknown>>;
 }
 
-const DECISION_META: Record<string, { label: string; Icon: typeof Check; color: string }> = {
-  approve: { label: "通过", Icon: Check, color: "text-green-700" },
-  edit: { label: "编辑", Icon: Pencil, color: "text-blue-700" },
-  skip: { label: "跳过", Icon: SkipForward, color: "text-muted-foreground" },
-  abort: { label: "中止", Icon: Square, color: "text-red-700" },
-  fork_from_stage: { label: "分叉", Icon: GitBranch, color: "text-purple-700" },
-  select_resume_point: { label: "恢复点", Icon: Play, color: "text-blue-700" },
-  redo: { label: "重做", Icon: RotateCcw, color: "text-amber-700" },
+const DECISION_META: Record<string, { label: string; Icon: typeof Check; tone: Tone }> = {
+  approve: { label: "通过", Icon: Check, tone: "green" },
+  edit: { label: "编辑", Icon: Pencil, tone: "blue" },
+  skip: { label: "跳过", Icon: SkipForward, tone: "slate" },
+  abort: { label: "中止", Icon: Square, tone: "red" },
+  fork_from_stage: { label: "分叉", Icon: GitBranch, tone: "violet" },
+  select_resume_point: { label: "恢复点", Icon: Play, tone: "blue" },
+  redo: { label: "重做", Icon: RotateCcw, tone: "amber" },
 };
 
 /** Vertical timeline of the experiment's user decisions. Each entry is one
@@ -47,7 +48,7 @@ export function DecisionHistory({ history }: DecisionHistoryProps) {
             <span
               className={cn(
                 "absolute -left-5 top-0.5 inline-flex h-3.5 w-3.5 items-center justify-center rounded-full bg-card ring-2 ring-border",
-                meta.color
+                TONE_CLASSES[meta.tone].text
               )}
             >
               <Icon className="h-2.5 w-2.5" />
@@ -58,7 +59,7 @@ export function DecisionHistory({ history }: DecisionHistoryProps) {
                 {String(h.stage_key ?? "")}
               </span>
               {h.redo === true && (
-                <span className="text-[10px] text-amber-700">(重做)</span>
+                <span className={cn("text-[10px]", TONE_CLASSES.amber.text)}>(重做)</span>
               )}
               {at && (
                 <span className="flex items-center gap-1 text-[10px] text-muted-foreground ml-auto">
@@ -68,7 +69,7 @@ export function DecisionHistory({ history }: DecisionHistoryProps) {
               )}
             </div>
             {Boolean(h.fork_experiment_id) && (
-              <div className="text-[11px] text-purple-700 mt-0.5">
+              <div className={cn("text-[11px] mt-0.5", TONE_CLASSES.violet.text)}>
                 → 新实验: {String(h.fork_experiment_id).slice(0, 12)}…
               </div>
             )}

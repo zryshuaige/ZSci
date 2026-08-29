@@ -1,16 +1,18 @@
 import { useState } from "react";
 import { useParams } from "react-router-dom";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
-import { api } from "@/lib/api";
+import { api, qk } from "@/api";
 import PdfReader from "@/components/pdf/PdfReader";
 import { Button } from "@/components/ui/Button";
 import { Textarea } from "@/components/ui/Input";
 import { Card } from "@/components/ui/Card";
-import { Badge } from "@/components/ui/Badge";
+import { StatusBadge, ToneBadge } from "@/components/ui/StatusBadge";
 import { Spinner } from "@/components/ui/Dialog";
+import { EmptyState } from "@/components/ui/EmptyState";
+import { AlertTriangle } from "@/components/ui/icons";
 import { cn } from "@/lib/cn";
-import { showFriendlyError } from "@/lib/useFriendlyError";
+import { useToastMutation } from "@/lib/hooks/useToastMutation";
 
 type Tab = "translate" | "note" | "metadata";
 
@@ -18,52 +20,53 @@ export default function PaperReaderPage() {
   const { paperId } = useParams<{ paperId: string }>();
   const qc = useQueryClient();
   const [tab, setTab] = useState<Tab>("translate");
-  const [translating, setTranslating] = useState(false);
   // H4: null = "not edited yet, fall back to saved content"; "" = explicitly
   // cleared. Previously `noteDraft || readingNote.content` made it impossible
   // to clear the note because `""` fell back to the saved content.
   const [noteDraft, setNoteDraft] = useState<string | null>(null);
 
   const { data: paper, isLoading } = useQuery({
-    queryKey: ["paper", paperId],
+    queryKey: qk.papers.one(paperId!),
     queryFn: () => api.getPaper(paperId!),
     enabled: !!paperId,
   });
   const { data: annotations = [] } = useQuery({
-    queryKey: ["annotations", paperId],
+    queryKey: qk.papers.annotations(paperId!),
     queryFn: () => api.listAnnotations(paperId!),
     enabled: !!paperId,
   });
   const { data: translations = [] } = useQuery({
-    queryKey: ["translations", paperId],
+    queryKey: qk.papers.translations(paperId!),
     queryFn: () => api.listTranslations(paperId!),
     enabled: !!paperId,
   });
   const { data: readingNote } = useQuery({
-    queryKey: ["reading-note", paperId],
+    queryKey: qk.papers.readingNote(paperId!),
     queryFn: () => api.getReadingNote(paperId!),
     enabled: !!paperId,
   });
 
-  const translateMutation = useMutation({
+  // 交互契约:每个 mutation 都必须有反馈 —— useToastMutation 默认
+  // onError→友好错误 toast,successMessage→成功 toast,不允许静默失败。
+  const translateMutation = useToastMutation({
     mutationFn: (args: { text: string; page: number }) =>
       api.translate(paperId!, { text: args.text, page: args.page }),
-    onMutate: () => setTranslating(true),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["translations", paperId] }),
-    onSettled: () => setTranslating(false),
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.papers.translations(paperId!) }),
   });
 
-  const deleteTranslationMutation = useMutation({
+  const deleteTranslationMutation = useToastMutation({
     mutationFn: (id: string) => api.deleteTranslation(id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["translations", paperId] }),
+    successMessage: "已删除翻译",
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.papers.translations(paperId!) }),
   });
 
-  const deleteAnnotationMutation = useMutation({
+  const deleteAnnotationMutation = useToastMutation({
     mutationFn: (id: string) => api.deleteAnnotation(id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["annotations", paperId] }),
+    successMessage: "已删除批注",
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.papers.annotations(paperId!) }),
   });
 
-  const addNoteMutation = useMutation({
+  const addNoteMutation = useToastMutation({
     mutationFn: (args: { text: string; page: number; rects_json: string | null }) =>
       api.createAnnotation(paperId!, {
         page_number: args.page,
@@ -72,47 +75,68 @@ export default function PaperReaderPage() {
         kind: "note",
         comment: "",
       }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["annotations", paperId] }),
+    successMessage: "已加入笔记",
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.papers.annotations(paperId!) }),
   });
 
-  const parseMutation = useMutation({
+  const parseMutation = useToastMutation({
     mutationFn: () => api.parsePaper(paperId!),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["paper", paperId] }),
-    onError: (err) => showFriendlyError(err),
+    successMessage: (r) => `解析完成,共 ${r.pages} 页`,
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.papers.one(paperId!) }),
   });
 
-  const genNoteMutation = useMutation({
+  const genNoteMutation = useToastMutation({
     mutationFn: () => api.generateReadingNote(paperId!),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["reading-note", paperId] }),
-    onError: (err) => showFriendlyError(err),
+    successMessage: "阅读笔记已生成",
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.papers.readingNote(paperId!) }),
   });
 
-  const saveNoteMutation = useMutation({
+  const saveNoteMutation = useToastMutation({
     mutationFn: (content: string) => api.updateReadingNote(paperId!, content),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["reading-note", paperId] }),
+    successMessage: "笔记已保存",
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.papers.readingNote(paperId!) }),
   });
 
   if (isLoading) return <div className="p-6"><Spinner /></div>;
-  if (!paper) return <div className="p-6">论文未找到。</div>;
+  if (!paper)
+    return (
+      <div className="p-6">
+        <EmptyState
+          icon={<AlertTriangle className="h-5 w-5" />}
+          title="论文未找到"
+          subtitle="它可能已被删除，或链接已过期"
+        />
+      </div>
+    );
   if (!paper.downloaded || !paper.local_pdf_path)
-    return <div className="p-6">该论文尚未下载到本地。</div>;
+    return (
+      <div className="p-6">
+        <EmptyState
+          icon={<AlertTriangle className="h-5 w-5" />}
+          title="该论文尚未下载到本地"
+          subtitle="请回到文献检索页完成下载确认后，再来阅读"
+        />
+      </div>
+    );
 
   return (
     <div className="flex flex-col h-full">
-      <div className="border-b border-border bg-card px-4 py-2 flex items-center gap-3 shrink-0">
+      <div className="h-11 shrink-0 border-b border-border/60 bg-card px-4 flex items-center gap-2">
         <div className="flex-1 min-w-0">
-          <div className="font-medium text-sm line-clamp-1">{paper.title}</div>
-          <div className="text-xs text-muted-foreground">
-            {[paper.year, paper.venue].filter(Boolean).join(" · ")} · 解析状态:{paper.parse_status || "未解析"}
+          <div className="text-sm font-semibold line-clamp-1">{paper.title}</div>
+          <div className="text-xs text-muted-foreground flex items-center gap-1 flex-wrap">
+            <span>{[paper.year, paper.venue].filter(Boolean).join(" · ")}</span>
+            <span>·</span>
+            <StatusBadge status={paper.parse_status ?? "none"} />
           </div>
         </div>
         <Button
           variant="outline"
           size="sm"
           onClick={() => parseMutation.mutate()}
-          disabled={parseMutation.isPending}
+          loading={parseMutation.isPending}
         >
-          {parseMutation.isPending ? "解析中…" : "重新解析"}
+          重新解析
         </Button>
       </div>
 
@@ -153,8 +177,8 @@ export default function PaperReaderPage() {
           <div className="flex-1 overflow-auto p-3 space-y-3">
             {tab === "translate" && (
               <>
-                {translating && <Spinner />}
-                {translations.length === 0 && !translating && (
+                {translateMutation.isPending && <Spinner />}
+                {translations.length === 0 && !translateMutation.isPending && (
                   <p className="text-sm text-muted-foreground">
                     选中论文中的段落,点击"翻译为中文"。翻译结果会保存到这里。
                   </p>
@@ -164,7 +188,7 @@ export default function PaperReaderPage() {
                     <div className="flex items-center justify-between gap-2">
                       <div className="text-xs text-muted-foreground">第 {t.page ?? "?"} 页 · {t.model}</div>
                       <button
-                        className="text-xs text-muted-foreground hover:text-destructive transition-colors"
+                        className="text-xs text-muted-foreground hover:text-destructive transition-colors disabled:opacity-50"
                         title="删除该翻译"
                         onClick={() => deleteTranslationMutation.mutate(t.id)}
                         disabled={deleteTranslationMutation.isPending}
@@ -185,9 +209,10 @@ export default function PaperReaderPage() {
                   <Button
                     size="sm"
                     onClick={() => genNoteMutation.mutate()}
-                    disabled={genNoteMutation.isPending || paper.parse_status !== "success"}
+                    loading={genNoteMutation.isPending}
+                    disabled={paper.parse_status !== "success"}
                   >
-                    {genNoteMutation.isPending ? "生成中…" : "生成阅读笔记"}
+                    生成阅读笔记
                   </Button>
                 </div>
                 {paper.parse_status !== "success" && (
@@ -211,7 +236,7 @@ export default function PaperReaderPage() {
                       size="sm"
                       variant="outline"
                       onClick={() => saveNoteMutation.mutate(noteDraft ?? readingNote.content)}
-                      disabled={saveNoteMutation.isPending}
+                      loading={saveNoteMutation.isPending}
                     >
                       保存修改
                     </Button>
@@ -241,7 +266,7 @@ export default function PaperReaderPage() {
                               <div className="line-clamp-2">{a.selected_text}</div>
                             </div>
                             <button
-                              className="text-muted-foreground hover:text-destructive transition-colors shrink-0"
+                              className="text-muted-foreground hover:text-destructive transition-colors shrink-0 disabled:opacity-50"
                               title="删除该批注"
                               onClick={() => deleteAnnotationMutation.mutate(a.id)}
                               disabled={deleteAnnotationMutation.isPending}
@@ -262,7 +287,7 @@ export default function PaperReaderPage() {
                 <div className="text-muted-foreground">{(paper.authors || []).join(", ")}</div>
                 <Row k="年份" v={paper.year} />
                 <Row k="会议" v={paper.venue} />
-                {paper.venue_verified && <Badge className="bg-accent text-accent-foreground">已验证顶会</Badge>}
+                {paper.venue_verified && <ToneBadge tone="blue">已验证顶会</ToneBadge>}
                 <Row k="DOI" v={paper.doi} />
                 <Row k="arXiv" v={paper.arxiv_id} />
                 <Row k="来源" v={paper.source} />

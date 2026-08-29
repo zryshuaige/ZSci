@@ -28,8 +28,10 @@ vite.config.d.ts
 frontend/tests/
 
 # --- ZSci workspace (local data, never commit) ---
-workspace/
-!workspace/.gitkeep
+# Anchor to the repo root: a bare `workspace/` would also exclude
+# backend/app/workspace/ (a real source package).
+/workspace/
+!/workspace/.gitkeep
 
 # --- IDE / OS ---
 .vscode/
@@ -38,14 +40,16 @@ workspace/
 *.swp
 *.swo
 
+# --- AI coding tools (local plans / artifacts / sessions) ---
+.zcode/
+.claude/
+.agents/
+.cursor/
+design.md
+
 # --- Secrets ---
 .env
 .env.*
 !.env.example
 *.key
-
-
-.claude/
-.agents/
-design.md
 

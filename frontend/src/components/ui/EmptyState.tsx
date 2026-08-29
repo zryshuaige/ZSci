@@ -35,7 +35,7 @@ export function EmptyState({
     >
       <div
         className={cn(
-          "flex justify-center mb-3 opacity-40",
+          "mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-muted text-muted-foreground [&>svg]:h-5 [&>svg]:w-5 mb-3",
           variant === "inline" && "mb-2",
         )}
       >

@@ -192,7 +192,7 @@ def test_c3_input_cannot_override_project_id(client, project):
 
     with _patch_gateway(_StubGateway()):
         resp = client.post(
-            f"/api/v1/projects/{project['id']}/agent/tasks",
+            f"/api/v1/projects/{project['id']}/agent/tasks?sync=1",
             json={
                 "task_type": "research.trend_analysis",
                 "input": {
@@ -252,7 +252,7 @@ def test_c1_trend_analysis_with_empty_paper_ids_stays_scoped(client, project):
 
     with _patch_gateway(_StubGateway()):
         resp = client.post(
-            f"/api/v1/projects/{project['id']}/agent/tasks",
+            f"/api/v1/projects/{project['id']}/agent/tasks?sync=1",
             json={
                 "task_type": "research.trend_analysis",
                 "input": {"user_request": "any"},

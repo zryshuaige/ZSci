@@ -11,15 +11,15 @@
 // 本轮范围:不让这一步阻断用户旅程;Plan 后端缺失时显示 fallback 文案,主 CTA 仍然能
 // 直接走 start_autonomous。
 
-import { useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { Play, Loader2, Save, ChevronLeft, ListChecks, Sparkles } from "lucide-react";
-import { api, fmtTime } from "@/lib/api";
+import { Play, Loader2, Save, ListChecks, Sparkles, AlertTriangle, RotateCw } from "@/components/ui/icons";
+import { api, fmtTime, qk } from "@/lib/api";
 import { showFriendlyError } from "@/lib/useFriendlyError";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Spinner } from "@/components/ui/Dialog";
+import WizardBar from "@/components/WizardBar";
 
 /** 后端 /preview-plan 返回的形状 — 用 ReturnType 自动对齐 api.previewPlan 的定义。 */
 type PlanPreview = NonNullable<Awaited<ReturnType<typeof api.previewPlan>>>;
@@ -43,7 +43,7 @@ export default function ExperimentPreviewPlanPage() {
   const navigate = useNavigate();
 
   const expQuery = useQuery({
-    queryKey: ["experiment", expId],
+    queryKey: qk.experiments.one(expId!),
     queryFn: () => api.getExperiment(expId!),
     enabled: !!expId,
   });
@@ -63,12 +63,15 @@ export default function ExperimentPreviewPlanPage() {
     onSuccess: ({ task_id }) => {
       const params = new URLSearchParams();
       if (task_id) params.set("task", task_id);
-      navigate(`/experiments/${expId}${params.toString() ? `?${params.toString()}` : ""}`);
+      // Bare /experiments/:id resolves via ExperimentRedirect, but navigate
+      // directly when we already know the project to skip the extra fetch.
+      const base = expQuery.data
+        ? `/projects/${expQuery.data.project_id}/experiments/${expId}`
+        : `/experiments/${expId}`;
+      navigate(`${base}${params.toString() ? `?${params.toString()}` : ""}`);
     },
     onError: (err) => showFriendlyError(err),
   });
-
-  const goBackToIdeas = () => navigate("/");
 
   if (expQuery.isLoading) {
     return (
@@ -80,7 +83,35 @@ export default function ExperimentPreviewPlanPage() {
     );
   }
 
+  // Never render the plan silently over a failed experiment fetch — that
+  // showed "未命名方向" with no way out.
+  if (expQuery.isError || !expQuery.data) {
+    return (
+      <div className="p-8 max-w-3xl mx-auto">
+        <Card className="p-6 text-center space-y-3">
+          <AlertTriangle className="mx-auto h-6 w-6 text-destructive/70" />
+          <div className="text-sm text-muted-foreground">实验信息加载失败</div>
+          <div className="flex justify-center gap-2">
+            <Button size="sm" variant="outline" onClick={() => expQuery.refetch()}>
+              <RotateCw className="h-3.5 w-3.5" /> 重试
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => navigate("/")}>
+              返回项目列表
+            </Button>
+          </div>
+        </Card>
+      </div>
+    );
+  }
+
   const exp = expQuery.data;
+  const detailPath = `/projects/${exp.project_id}/experiments/${exp.id}`;
+  // 返回候选屏：带上研究问题作为 idea 参数 —— 候选屏按 ?idea= 重新生成候选，
+  // 不再落入「必现空态」断头路（旧链接 /explore/:id/ideas 已由路由重定向兼容）。
+  const ideasQuery = exp.research_question || exp.hypothesis || exp.title || "";
+  const ideasPath = `/projects/${exp.project_id}/explore/ideas${
+    ideasQuery ? `?idea=${encodeURIComponent(ideasQuery)}` : ""
+  }`;
   const plan = planQuery.data;
   const hasPlan = plan?.has_plan === true;
   const estMinutes = plan?.est_minutes ?? 120;
@@ -101,11 +132,12 @@ export default function ExperimentPreviewPlanPage() {
 
   return (
     <div className="p-8 max-w-3xl mx-auto space-y-5">
+      <WizardBar projectId={exp.project_id} current={3} />
       {/* Header */}
       <div className="space-y-1">
         <button
           type="button"
-          onClick={goBackToIdeas}
+          onClick={() => navigate(ideasPath)}
           className="text-[11px] text-muted-foreground hover:text-foreground transition-colors"
         >
           ← 返回候选方向
@@ -192,7 +224,7 @@ export default function ExperimentPreviewPlanPage() {
         <Button
           variant="outline"
           size="sm"
-          onClick={() => navigate(`/experiments/${expId}`)}
+          onClick={() => navigate(detailPath)}
           disabled={startMutation.isPending}
         >
           <Save className="h-4 w-4" />
@@ -212,10 +244,7 @@ export default function ExperimentPreviewPlanPage() {
         </Button>
       </div>
 
-      <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground/70">
-        <ChevronLeft className="h-3 w-3" />
-        整体流程:梳理研究方向 → 选定方向 → 确认首轮计划 → 启动验证
-      </div>
+      {/* 流程位置已由顶部 WizardBar 呈现。 */}
     </div>
   );
 }

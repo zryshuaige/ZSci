@@ -1,22 +1,59 @@
 import type { Config } from "tailwindcss";
 
+/* 「精密仪器」设计 token —— 颜色全部引用 index.css :root 中的 CSS 变量。
+   铁律:变量值必须是裸 `H S% L%` 三元组(绝不能写 hex),否则所有
+   `bg-primary/5`、`border-border/60` 透明度修饰符会静默失效。 */
 export default {
   content: ["./index.html", "./src/**/*.{ts,tsx}"],
   theme: {
     extend: {
       colors: {
-        border: "hsl(240 6% 90%)",
-        input: "hsl(240 6% 90%)",
-        ring: "hsl(222 47% 50%)",
-        background: "hsl(0 0% 100%)",
-        foreground: "hsl(240 10% 12%)",
-        muted: { DEFAULT: "hsl(240 5% 96%)", foreground: "hsl(240 4% 46%)" },
-        primary: { DEFAULT: "hsl(222 47% 30%)", foreground: "hsl(0 0% 100%)" },
-        accent: { DEFAULT: "hsl(217 91% 60%)", foreground: "hsl(0 0% 100%)" },
-        destructive: { DEFAULT: "hsl(0 72% 51%)", foreground: "hsl(0 0% 100%)" },
-        card: { DEFAULT: "hsl(0 0% 100%)", foreground: "hsl(240 10% 12%)" },
+        border: "hsl(var(--border) / <alpha-value>)",
+        input: "hsl(var(--input) / <alpha-value>)",
+        ring: "hsl(var(--ring) / <alpha-value>)",
+        background: "hsl(var(--background) / <alpha-value>)",
+        foreground: "hsl(var(--foreground) / <alpha-value>)",
+        muted: {
+          DEFAULT: "hsl(var(--muted) / <alpha-value>)",
+          foreground: "hsl(var(--muted-foreground) / <alpha-value>)",
+        },
+        primary: {
+          DEFAULT: "hsl(var(--primary) / <alpha-value>)",
+          foreground: "hsl(var(--primary-foreground) / <alpha-value>)",
+        },
+        destructive: {
+          DEFAULT: "hsl(var(--destructive) / <alpha-value>)",
+          foreground: "hsl(var(--destructive-foreground) / <alpha-value>)",
+        },
+        card: {
+          DEFAULT: "hsl(var(--card) / <alpha-value>)",
+          foreground: "hsl(var(--card-foreground) / <alpha-value>)",
+        },
+        sidebar: {
+          DEFAULT: "hsl(var(--sidebar) / <alpha-value>)",
+          foreground: "hsl(var(--sidebar-foreground) / <alpha-value>)",
+          muted: "hsl(var(--sidebar-muted) / <alpha-value>)",
+        },
       },
-      borderRadius: { lg: "0.5rem", md: "0.375rem", sm: "0.25rem" },
+      /* 仪器感 = 更利落的角:控件 rounded-md(6px),卡 rounded-lg(8px) */
+      borderRadius: {
+        lg: "0.5rem",
+        md: "0.375rem",
+        sm: "0.25rem",
+        xl: "0.625rem",
+        "2xl": "0.875rem",
+      },
+      /* 数据/日志等宽字族(Win11 自带 Cascadia Mono) */
+      fontFamily: {
+        mono: [
+          "ui-monospace",
+          "SF Mono",
+          "Cascadia Mono",
+          "Consolas",
+          "Menlo",
+          "monospace",
+        ],
+      },
       /* Motion tokens — strong custom curves, never bare ease-in on UI.
          Source: apple-design / improve-animations STANDARDS. */
       transitionTimingFunction: {
@@ -44,11 +81,11 @@ export default {
         modal: "50",
         toast: "60",
       },
-      /* Softer, layered shadows for depth without harshness. */
+      /* 冷调分层阴影:发丝边承担 90% 分层,阴影只留给浮层。 */
       boxShadow: {
-        soft: "0 1px 2px rgba(0,0,0,0.04), 0 1px 3px rgba(0,0,0,0.05)",
-        medium: "0 4px 12px rgba(0,0,0,0.08)",
-        float: "0 8px 24px rgba(0,0,0,0.10)",
+        soft: "0 1px 2px rgba(16, 24, 40, 0.04), 0 1px 3px rgba(16, 24, 40, 0.06)",
+        medium: "0 2px 6px rgba(16, 24, 40, 0.05), 0 8px 24px rgba(16, 24, 40, 0.08)",
+        float: "0 12px 32px rgba(16, 24, 40, 0.14)",
       },
       keyframes: {
         "zsci-fade-in": {

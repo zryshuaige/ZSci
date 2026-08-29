@@ -1,20 +1,24 @@
 import { useMemo, useState } from "react";
 import { Link, useOutletContext } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { FileText, Search } from "lucide-react";
-import { api, type Project } from "@/lib/api";
+import { AlertTriangle, FileText, RotateCw, Search } from "@/components/ui/icons";
+import { api, qk, type Project } from "@/api";
+import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
+import { PageHeader } from "@/components/ui/PageHeader";
 import { Badge } from "@/components/ui/Badge";
+import { StatusBadge, ToneBadge } from "@/components/ui/StatusBadge";
 import { Input } from "@/components/ui/Input";
+import { Select, SelectOptions } from "@/components/ui/Select";
 import { ListSkeleton } from "@/components/ui/Skeleton";
-import { cn } from "@/lib/cn";
+import { EmptyState } from "@/components/ui/EmptyState";
 
 type SortKey = "recent" | "year" | "title";
 
 export default function PapersListPage() {
   const { project } = useOutletContext<{ project: Project }>();
-  const { data: papers, isLoading } = useQuery({
-    queryKey: ["papers", project.id],
+  const { data: papers, isLoading, isError, refetch } = useQuery({
+    queryKey: qk.papers.byProject(project.id),
     queryFn: () => api.listPapers(project.id),
   });
 
@@ -55,27 +59,42 @@ export default function PapersListPage() {
 
   return (
     <div className="p-8 max-w-5xl mx-auto space-y-5">
-      <h1 className="text-xl font-semibold tracking-tight">PDF 阅读</h1>
+      <PageHeader title="PDF 阅读" subtitle="阅读与管理项目内已下载的论文" />
 
+      {/* 三态:加载骨架 / 错误卡+重试(错误≠空,不能渲染成空态)/ 空态给出口 */}
       {isLoading ? (
         <ListSkeleton rows={3} />
-      ) : downloaded.length === 0 ? (
-        <Card className="p-10 text-center text-muted-foreground animate-pop">
-          <FileText className="h-10 w-10 mx-auto mb-3 opacity-40" />
-          <div className="text-sm">还没有已下载的论文</div>
-          <div className="text-xs mt-1.5">
-            请先到{" "}
-            <Link to={`/projects/${project.id}/literature`} className="text-primary underline">
-              文献库
-            </Link>{" "}
-            搜索并下载
-          </div>
+      ) : isError ? (
+        <Card className="p-6 text-center">
+          <AlertTriangle className="mx-auto h-6 w-6 text-destructive/70" />
+          <div className="mt-2 text-sm text-muted-foreground">论文列表加载失败</div>
+          <Button
+            size="sm"
+            variant="outline"
+            className="mt-3"
+            onClick={() => refetch()}
+          >
+            <RotateCw className="h-3.5 w-3.5" /> 重试
+          </Button>
         </Card>
+      ) : downloaded.length === 0 ? (
+        <EmptyState
+          icon={<FileText className="h-10 w-10" />}
+          title="还没有已下载的论文"
+          subtitle="到文献库检索并下载论文,或导入本地 PDF,之后回到这里阅读"
+          action={
+            <Link to={`/projects/${project.id}/literature`}>
+              <Button size="sm">
+                <Search className="h-4 w-4" /> 去文献库检索
+              </Button>
+            </Link>
+          }
+        />
       ) : (
         <>
-          {/* Filter bar — search + venue + parse-status + sort. Apple-style
-              grouped controls in a single glass card. */}
-          <Card className="p-3 glass">
+          {/* Filter bar — search + venue + parse-status + sort. Grouped
+              controls in a single plain card. */}
+          <Card className="p-3">
             <div className="flex flex-wrap items-center gap-2">
               <div className="relative flex-1 min-w-48">
                 <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
@@ -86,25 +105,47 @@ export default function PapersListPage() {
                   className="pl-8"
                 />
               </div>
-              <Select value={venue} onChange={setVenue} options={[{ value: "all", label: "全部会议" }, ...venues.map((v) => ({ value: v, label: v }))]} />
               <Select
+                label="会议"
+                size="sm"
+                value={venue}
+                onChange={(e) => setVenue(e.target.value)}
+              >
+                <SelectOptions
+                  items={[
+                    { value: "all", label: "全部" },
+                    ...venues.map((v) => ({ value: v, label: v })),
+                  ]}
+                />
+              </Select>
+              <Select
+                label="状态"
+                size="sm"
                 value={parseFilter}
-                onChange={setParseFilter}
-                options={[
-                  { value: "all", label: "全部状态" },
-                  { value: "success", label: "已解析" },
-                  { value: "none", label: "未解析" },
-                ]}
-              />
+                onChange={(e) => setParseFilter(e.target.value)}
+              >
+                <SelectOptions
+                  items={[
+                    { value: "all", label: "全部" },
+                    { value: "success", label: "已解析" },
+                    { value: "none", label: "未解析" },
+                  ]}
+                />
+              </Select>
               <Select
+                label="排序"
+                size="sm"
                 value={sort}
-                onChange={(v) => setSort(v as SortKey)}
-                options={[
-                  { value: "recent", label: "最近更新" },
-                  { value: "year", label: "年份降序" },
-                  { value: "title", label: "标题排序" },
-                ]}
-              />
+                onChange={(e) => setSort(e.target.value as SortKey)}
+              >
+                <SelectOptions
+                  items={[
+                    { value: "recent", label: "最近更新" },
+                    { value: "year", label: "年份降序" },
+                    { value: "title", label: "标题排序" },
+                  ]}
+                />
+              </Select>
             </div>
           </Card>
 
@@ -124,20 +165,21 @@ export default function PapersListPage() {
                     <div className="flex items-start justify-between gap-3">
                       <div className="flex-1 min-w-0">
                         <div className="font-medium leading-snug line-clamp-2">{p.title}</div>
-                        <div className="text-sm text-muted-foreground mt-0.5">
+                        <div className="text-xs text-muted-foreground mt-0.5">
                           {p.authors.slice(0, 3).join(", ")}
                           {p.authors.length > 3 ? " et al." : ""}
                         </div>
                         <div className="flex items-center gap-2 mt-1.5 flex-wrap">
-                          {[p.year, p.venue].filter(Boolean).map((x, idx) => (
-                            <Badge key={idx} className="bg-muted">{x}</Badge>
-                          ))}
-                          {p.venue_verified && (
-                            <Badge className="bg-accent text-accent-foreground">已验证顶会</Badge>
+                          {p.year && (
+                            <Badge className="bg-muted/70 text-[11px] tabular-nums">{p.year}</Badge>
                           )}
-                          <Badge className={cn("bg-muted", p.parse_status === "success" && "bg-green-100 text-green-800")}>
-                            {p.parse_status === "success" ? "已解析" : p.parse_status || "未解析"}
-                          </Badge>
+                          {p.venue && (
+                            <Badge className="bg-muted/70 text-[11px] max-w-[10rem] truncate">{p.venue}</Badge>
+                          )}
+                          {p.venue_verified && (
+                            <ToneBadge tone="blue">已验证顶会</ToneBadge>
+                          )}
+                          <StatusBadge status={p.parse_status ?? "none"} />
                         </div>
                       </div>
                       <FileText className="h-5 w-5 text-muted-foreground shrink-0 mt-0.5" />
@@ -150,27 +192,5 @@ export default function PapersListPage() {
         </>
       )}
     </div>
-  );
-}
-
-function Select({
-  value,
-  onChange,
-  options,
-}: {
-  value: string;
-  onChange: (v: string) => void;
-  options: { value: string; label: string }[];
-}) {
-  return (
-    <select
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-      className="h-9 rounded-md border border-border bg-card px-3 text-sm text-foreground transition-colors duration-sm ease-out hover:bg-muted focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-    >
-      {options.map((o) => (
-        <option key={o.value} value={o.value}>{o.label}</option>
-      ))}
-    </select>
   );
 }

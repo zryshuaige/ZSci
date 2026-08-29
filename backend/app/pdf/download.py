@@ -46,22 +46,32 @@ class DownloadError(RuntimeError):
 # from these well-known locations only; arbitrary filesystem paths are rejected
 # to prevent server-side file probing.
 def _local_import_allowed_roots() -> list[Path]:
+    import os
+
     home = Path.home()
-    return [
+    roots = [
         (home / "Downloads").resolve(),
         (home / "Desktop").resolve(),
         (home / "Documents").resolve(),
-        (Path("/tmp")).resolve(),
-        (Path("/var/folders")).resolve(),
     ]
+    if os.name == "nt":
+        # Windows: the user's temp tree (pytest tmp_path, browser downloads
+        # in progress, etc. live under %LOCALAPPDATA%\Temp).
+        roots.append(Path(os.environ.get("TEMP", home / "AppData" / "Local" / "Temp")).resolve())
+    else:
+        roots.append((Path("/tmp")).resolve())
+        roots.append((Path("/var/folders")).resolve())
+    return roots
 
 
 def _is_within_allowed_source(path: Path) -> bool:
     """Return True if `path` is within one of the allowed import roots."""
-    resolved = path.resolve()
+    import os
+
+    resolved = Path(os.path.normcase(str(path.resolve())))
     for root in _local_import_allowed_roots():
         try:
-            resolved.relative_to(root)
+            resolved.relative_to(Path(os.path.normcase(str(root))))
             return True
         except ValueError:
             continue
@@ -244,9 +254,8 @@ def _append_to_references_bib(project_slug: str, paper: Paper) -> None:
     read-check-write is guarded by an exclusive file lock so concurrent
     downloads (e.g. multiple workers) don't clobber each other's entry.
     """
-    import fcntl
-
     from app.pdf.bib import _cite_key
+    from app.utils import exclusive_file_lock
 
     settings = get_settings()
     writing_root = settings.projects_root / project_slug / "writing" / "paper"
@@ -258,8 +267,7 @@ def _append_to_references_bib(project_slug: str, paper: Paper) -> None:
     cite_key = _cite_key(paper)
     entry = to_bibtex(paper)
     with open(lock_path, "w", encoding="utf-8") as lockf:
-        fcntl.flock(lockf, fcntl.LOCK_EX)
-        try:
+        with exclusive_file_lock(lockf):
             existing = ""
             if bib_path.exists():
                 existing = bib_path.read_text(encoding="utf-8", errors="replace")
@@ -269,8 +277,6 @@ def _append_to_references_bib(project_slug: str, paper: Paper) -> None:
                 return  # already present
             new_content = (existing.rstrip() + "\n\n" + entry) if existing.strip() else entry
             bib_path.write_text(new_content, encoding="utf-8")
-        finally:
-            fcntl.flock(lockf, fcntl.LOCK_UN)
 
 
 async def import_local_pdf(

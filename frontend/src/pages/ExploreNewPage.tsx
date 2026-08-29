@@ -11,14 +11,18 @@
 // plan 的"少按钮"原则。
 
 import { useEffect, useMemo, useState } from "react";
-import { useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Sparkles, Lightbulb } from "lucide-react";
-import { api, type MultiIdeaCandidate, type Project } from "@/lib/api";
+import { Lightbulb, Settings } from "@/components/ui/icons";
+import { api, qk, type MultiIdeaCandidate, type Project } from "@/api";
 import { showFriendlyError } from "@/lib/useFriendlyError";
+import { useLLMReadiness } from "@/lib/hooks/useLLMReadiness";
 import { Card } from "@/components/ui/Card";
+import { PageHeader } from "@/components/ui/PageHeader";
 import { Spinner } from "@/components/ui/Dialog";
+import { Button } from "@/components/ui/Button";
 import { AIUnderstandingCard, summariseCandidate } from "@/components/explore/AIUnderstandingCard";
+import WizardBar from "@/components/WizardBar";
 
 interface ExploreNewPageProps {
   // The Project context comes from <ProjectLayout />'s <Outlet />.
@@ -30,9 +34,11 @@ export default function ExploreNewPage(_: ExploreNewPageProps) {
   const ideaParam = searchParams.get("idea") || "";
   const navigate = useNavigate();
   const qc = useQueryClient();
+  // 首启预检：未配置模型时给出引导卡，而不是让第一次点击撞 503。
+  const llm = useLLMReadiness();
 
   const { data: project } = useQuery<Project>({
-    queryKey: ["project", projectId],
+    queryKey: qk.projects.one(projectId!),
     queryFn: () => api.getProject(projectId!),
     enabled: !!projectId,
   });
@@ -57,7 +63,8 @@ export default function ExploreNewPage(_: ExploreNewPageProps) {
 
   const runIdeaQuery = useQuery({
     queryKey: ["explore", "candidates", projectId, ideaText],
-    enabled: !!projectId && !!ideaText.trim(),
+    // 预检未就绪（ready === false）时不发起 LLM 调用，由引导卡接管。
+    enabled: !!projectId && !!ideaText.trim() && llm.ready !== false,
     queryFn: async () => {
       const task = await api.generateIdeaCandidates(projectId!, ideaText.trim());
       let parsed: { candidates?: MultiIdeaCandidate[] } = {};
@@ -70,6 +77,8 @@ export default function ExploreNewPage(_: ExploreNewPageProps) {
       // Pick the recommended one as the AI leader; if none, pick the first.
       const next = candidates.find((c) => c.recommended) ?? candidates[0] ?? null;
       setLeader(next);
+      // 候选已入库（status=候选）——刷新想法页/侧栏计数。
+      qc.invalidateQueries({ queryKey: qk.ideas.byProject(projectId!) });
       return candidates;
     },
     staleTime: 60_000,
@@ -85,7 +94,7 @@ export default function ExploreNewPage(_: ExploreNewPageProps) {
   }, [ideaText]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const understanding = useMemo(
-    () => summariseCandidate(leader),
+    () => summariseCandidate(leader, ideaText),
     [leader],
   );
 
@@ -104,18 +113,13 @@ export default function ExploreNewPage(_: ExploreNewPageProps) {
   }, [leader]);
 
   // Acceptance → leave this page, head to the candidate-comparison screen.
-  // We pass the leader candidate + prompt so the next page can render the
-  // grid from cached data rather than refetching the LLM.
+  // 候选已由后端持久化到研究想法库（status=候选），对比屏直接从库里读 ——
+  // 离开再回来不会重跑 LLM，也不需要 query-cache handoff。
   function accept() {
     if (!projectId || !ideaText.trim()) return;
-    // Stash the candidates in the query cache so the next page's
-    // listCandQuery seed finds them without re-running the LLM.
-    qc.setQueryData(
-      ["explore", "candidates", projectId, ideaText.trim()],
-      runIdeaQuery.data ?? [],
-    );
+    qc.invalidateQueries({ queryKey: qk.ideas.byProject(projectId) });
     const params = new URLSearchParams({ idea: ideaText.trim() });
-    navigate(`/explore/${projectId}/ideas?${params.toString()}`);
+    navigate(`/projects/${projectId}/explore/ideas?${params.toString()}`);
   }
 
   async function startRevision() {
@@ -142,19 +146,37 @@ export default function ExploreNewPage(_: ExploreNewPageProps) {
 
   return (
     <div className="p-8 max-w-3xl mx-auto space-y-5">
+      <WizardBar projectId={projectId} current={1} />
       <div className="space-y-1">
         <div className="text-xs text-muted-foreground">
-          研究方向 / {project?.name ?? projectId} / 梳理候选
+          {project?.name ?? "研究项目"} / 梳理候选
         </div>
-        <h1 className="text-xl font-semibold tracking-tight">
-          研究问题概述
-        </h1>
-        <p className="text-sm text-muted-foreground">
-          根据你的描述,系统先整理出对研究问题的理解,并据此给出若干差异化的候选方向供你选择。
-        </p>
+        <PageHeader
+          title="研究问题概述"
+          subtitle="根据你的描述,系统先整理出对研究问题的理解,并据此给出若干差异化的候选方向供你选择。"
+        />
       </div>
 
-      {runIdeaQuery.isLoading || runIdeaQuery.isFetching ? (
+      {/* LLM 预检：未配置模型时给明确出口，不让用户的第一步撞墙。 */}
+      {llm.ready === false && (
+        <Card className="p-5 border-amber-300 bg-amber-50/40 space-y-2">
+          <div className="flex items-center gap-2 text-sm font-medium">
+            <Settings className="h-4 w-4 text-amber-600" />
+            还没有配置 AI 模型
+          </div>
+          <p className="text-xs text-muted-foreground leading-relaxed">
+            整理研究想法需要调用大模型。请先到设置页填入模型 API Key（支持 DeepSeek、OpenAI、智谱等），
+            配置完成后回到这里继续。
+          </p>
+          <Link to="/settings">
+            <Button size="sm" variant="outline" className="mt-1">
+              <Settings className="h-3.5 w-3.5" /> 去配置模型
+            </Button>
+          </Link>
+        </Card>
+      )}
+
+      {llm.ready !== false && (runIdeaQuery.isLoading || runIdeaQuery.isFetching) ? (
         <Card className="p-6 space-y-3">
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
             <Spinner />
@@ -169,7 +191,7 @@ export default function ExploreNewPage(_: ExploreNewPageProps) {
         </Card>
       ) : runIdeaQuery.isError ? (
         <Card className="p-4 text-sm">
-          <div className="text-foreground">这一轮未能整理出研究方向。</div>
+          <div className="text-foreground">这一轮未能整理出候选研究想法。</div>
           <div className="text-xs text-muted-foreground mt-1">
             可以
             <button
@@ -211,12 +233,7 @@ export default function ExploreNewPage(_: ExploreNewPageProps) {
         </p>
       </Card>
 
-      {/* Background progress hint (subtle). The user shouldn't see skeleton or
-          percent copy — just an honest "may take a moment". */}
-      <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground/70">
-        <Sparkles className="h-3 w-3" />
-        整体流程:梳理研究问题 → 选定方向 → 确认首轮计划 → 启动验证
-      </div>
+      {/* 流程位置已由顶部 WizardBar 呈现。 */}
     </div>
   );
 }

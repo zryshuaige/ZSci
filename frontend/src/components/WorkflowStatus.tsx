@@ -1,37 +1,28 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useNavigate } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
 import {
   FlaskConical, Bot, Play, Loader2, CheckCircle2, XCircle, Activity,
   Search, Download, FileText, Languages, NotebookPen, FileCode, BookOpen,
-} from "lucide-react";
-import { api, type ActiveWorkflowTask, type ActiveWorkflowRun, type Job } from "@/lib/api";
+} from "@/components/ui/icons";
+import type { ActiveWorkflowTask, ActiveWorkflowRun, Job } from "@/api";
 import { cn } from "@/lib/cn";
+import { TONE_CLASSES } from "@/lib/statusMeta";
+import { humanizeEventMessage } from "@/lib/eventHumanize";
 import { Tooltip } from "@/components/ui/Tooltip";
 import {
   agentStatusLabel,
   agentTaskLabel,
   jobDisplayTitle,
 } from "@/lib/labels";
+import { useActiveWorkflows } from "@/lib/hooks/useActiveWorkflows";
 
 export default function WorkflowStatus({ collapsed }: { collapsed: boolean }) {
   const navigate = useNavigate();
-  const { data } = useQuery({
-    queryKey: ["workflows", "active"],
-    queryFn: () => api.listActiveWorkflows(),
-    refetchInterval: (q) => {
-      const d = q.state.data;
-      const hasActive =
-        !!d &&
-        (d.tasks.some((t) => !t.recent) ||
-          d.jobs.some((j) => !j.recent) ||
-          d.runs.length > 0);
-      return hasActive ? 2000 : 4000;
-    },
-    refetchOnWindowFocus: false,
-    retry: 1,
-  });
+  // The single shared observer — all pages consume this query's cache and
+  // its one polling timer (2s busy / 8s idle), instead of every component
+  // scheduling its own.
+  const { data } = useActiveWorkflows();
 
   const activeTasks = (data?.tasks ?? []).filter((t) => !t.recent);
   const recentTasks = (data?.tasks ?? []).filter((t) => t.recent);
@@ -64,7 +55,7 @@ export default function WorkflowStatus({ collapsed }: { collapsed: boolean }) {
 
   return (
     <div className="px-2 py-2 space-y-1">
-      <div className="px-1 flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
+      <div className="px-1 flex items-center gap-1.5 text-[11px] font-medium text-sidebar-muted">
         {activeCount > 0 ? (
           <span className="relative flex h-2 w-2">
             <span className="absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75 animate-ping" />
@@ -74,11 +65,11 @@ export default function WorkflowStatus({ collapsed }: { collapsed: boolean }) {
           <Activity className="h-3 w-3" />
         )}
         进行中的任务
-        {activeCount > 0 && <span className="text-blue-600">{activeCount}</span>}
+        {activeCount > 0 && <span className="text-sidebar-muted">{activeCount}</span>}
       </div>
 
       {activeTasks.length === 0 && runs.length === 0 && activeJobs.length === 0 && recentTasks.length === 0 && recentJobs.length === 0 && (
-        <div className="px-1 py-1 text-[11px] text-muted-foreground/70">暂无进行中的任务</div>
+        <div className="px-1 py-1 text-[11px] text-sidebar-muted/70">暂无进行中的任务</div>
       )}
 
       <TaskList
@@ -178,8 +169,8 @@ function CollapsedActivity({
           className={cn(
             "relative flex h-9 w-9 mx-auto items-center justify-center rounded-md transition-colors duration-sm ease-out",
             activeCount > 0
-              ? "bg-blue-50 text-blue-600 hover:bg-blue-100"
-              : "text-muted-foreground hover:bg-muted",
+              ? "bg-primary/10 text-primary hover:bg-primary/15"
+              : "text-sidebar-muted hover:text-sidebar-foreground hover:bg-white/[0.06]",
           )}
         >
           {activeCount > 0 ? (
@@ -249,15 +240,15 @@ function TaskList({
           key={r.run_id}
           type="button"
           onClick={() => onNavigate(linkForRun(r))}
-          className="w-full text-left flex items-start gap-2 rounded-md px-2 py-1.5 text-xs text-muted-foreground hover:bg-muted hover:text-foreground transition-colors duration-sm ease-out active:scale-[0.98]"
+          className="w-full text-left flex items-start gap-2 rounded-md px-2 py-1.5 text-xs text-sidebar-muted hover:bg-white/[0.06] hover:text-sidebar-foreground transition-colors duration-sm ease-out active:scale-[0.98]"
         >
           <Play className="h-3.5 w-3.5 mt-0.5 shrink-0 text-emerald-500" />
           <span className="min-w-0 flex-1">
-            <span className="block truncate font-medium text-foreground">
+            <span className="block truncate font-medium text-sidebar-foreground">
               实验运行中
               {r.experiment_title ? ` · ${r.experiment_title}` : ""}
             </span>
-            <span className="block truncate text-[11px] text-muted-foreground/80">
+            <span className="block truncate text-[11px] text-sidebar-muted/80">
               点击查看进度
             </span>
           </span>
@@ -265,7 +256,7 @@ function TaskList({
       ))}
       {(recentTasks.length > 0 || recentJobs.length > 0) && (
         <>
-          <div className="px-1 pt-1 text-[10px] text-muted-foreground/50">最近完成</div>
+          <div className="px-1 pt-1 text-[10px] text-sidebar-muted/50">最近完成</div>
           {recentTasks.map((t) => (
             <WorkflowRow key={t.id} t={t} onClick={() => onNavigate(linkForTask(t))} />
           ))}
@@ -287,8 +278,8 @@ function WorkflowRow({ t, onClick }: { t: ActiveWorkflowTask; onClick: () => voi
       type="button"
       onClick={onClick}
       className={cn(
-        "w-full text-left flex items-start gap-2 rounded-md px-2 py-1.5 text-xs hover:bg-muted transition-colors duration-sm ease-out active:scale-[0.98]",
-        isRecent ? "text-muted-foreground/70" : "text-muted-foreground hover:text-foreground",
+        "w-full text-left flex items-start gap-2 rounded-md px-2 py-1.5 text-xs hover:bg-white/[0.06] transition-colors duration-sm ease-out active:scale-[0.98]",
+        isRecent ? "text-sidebar-muted/70" : "text-sidebar-muted hover:text-sidebar-foreground",
       )}
     >
       {t.task_type === "experiment.autonomous_run" ? (
@@ -299,16 +290,18 @@ function WorkflowRow({ t, onClick }: { t: ActiveWorkflowTask; onClick: () => voi
         <Bot className="h-3.5 w-3.5 mt-0.5 shrink-0 text-violet-500" />
       )}
       <span className="min-w-0 flex-1">
-        <span className={cn("block truncate", !isRecent && "font-medium text-foreground")}>
+        <span className={cn("block truncate", !isRecent && "font-medium text-sidebar-foreground")}>
           {agentTaskLabel(t.task_type)}
           {isRecent && (
-            <span className={cn("ml-1", failed ? "text-red-500" : done ? "text-green-600" : "text-muted-foreground")}>
+            <span className={cn("ml-1", failed ? TONE_CLASSES.red.text : done ? TONE_CLASSES.green.text : "text-sidebar-muted")}>
               {agentStatusLabel(t.status)}
             </span>
           )}
         </span>
         {t.last_message && !isRecent && (
-          <span className="block truncate text-[11px] text-muted-foreground/80">{t.last_message}</span>
+          <span className="block truncate text-[11px] text-sidebar-muted/80">
+            {humanizeEventMessage(t.last_message)}
+          </span>
         )}
       </span>
     </button>
@@ -331,7 +324,9 @@ const JOB_ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
 function JobRow({ j, onClick }: { j: Job; onClick: () => void }) {
   const isRecent = j.recent;
   const failed = ["failed", "stopped"].includes(j.status);
-  const done = j.status === "completed";
+  // Backend Job statuses are running/done/failed — accept "completed" too so
+  // a legacy row doesn't render as in-flight forever.
+  const done = j.status === "done" || j.status === "completed";
   const Icon = JOB_ICONS[j.kind] ?? Activity;
   const title = jobDisplayTitle(j.title, j.kind);
   return (
@@ -339,8 +334,8 @@ function JobRow({ j, onClick }: { j: Job; onClick: () => void }) {
       type="button"
       onClick={onClick}
       className={cn(
-        "w-full text-left flex items-start gap-2 rounded-md px-2 py-1.5 text-xs hover:bg-muted transition-colors duration-sm ease-out active:scale-[0.98]",
-        isRecent ? "text-muted-foreground/70" : "text-muted-foreground hover:text-foreground",
+        "w-full text-left flex items-start gap-2 rounded-md px-2 py-1.5 text-xs hover:bg-white/[0.06] transition-colors duration-sm ease-out active:scale-[0.98]",
+        isRecent ? "text-sidebar-muted/70" : "text-sidebar-muted hover:text-sidebar-foreground",
       )}
     >
       {!isRecent && !done && !failed ? (
@@ -353,19 +348,19 @@ function JobRow({ j, onClick }: { j: Job; onClick: () => void }) {
         <Icon className="h-3.5 w-3.5 mt-0.5 shrink-0 text-blue-500" />
       )}
       <span className="min-w-0 flex-1">
-        <span className={cn("block truncate", !isRecent && "font-medium text-foreground")}>
+        <span className={cn("block truncate", !isRecent && "font-medium text-sidebar-foreground")}>
           {title}
           {isRecent && (
-            <span className={cn("ml-1", failed ? "text-red-500" : done ? "text-green-600" : "text-muted-foreground")}>
+            <span className={cn("ml-1", failed ? TONE_CLASSES.red.text : done ? TONE_CLASSES.green.text : "text-sidebar-muted")}>
               {agentStatusLabel(j.status)}
             </span>
           )}
         </span>
         {j.message && !isRecent && (
-          <span className="block truncate text-[11px] text-muted-foreground/80">{j.message}</span>
+          <span className="block truncate text-[11px] text-sidebar-muted/80">{j.message}</span>
         )}
         {isRecent && j.result_summary && (
-          <span className="block truncate text-[11px] text-muted-foreground/80">{j.result_summary}</span>
+          <span className="block truncate text-[11px] text-sidebar-muted/80">{j.result_summary}</span>
         )}
       </span>
     </button>

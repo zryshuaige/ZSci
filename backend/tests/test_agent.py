@@ -136,8 +136,8 @@ def test_idea_title_truncates_long_text():
 def test_idea_title_fallback_only_when_nothing_to_derive():
     from app.agent.research_skills import _idea_title
 
-    assert _idea_title({}) == "未命名 idea"
-    assert _idea_title({"motivation": ""}) == "未命名 idea"
+    assert _idea_title({}) == "未命名想法"
+    assert _idea_title({"motivation": ""}) == "未命名想法"
 
 
 def test_hypothesis_skill_derives_title_when_model_omits_name(db_session, isolated_workspace):

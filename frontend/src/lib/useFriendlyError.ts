@@ -196,7 +196,15 @@ export function useFriendlyError(err: unknown | null | undefined): FriendlyError
 // Global toast queue
 // ---------------------------------------------------------------------------
 
-type ToastEntry = FriendlyErrorDisplay & { id: number };
+export type ToastTone = "success" | "info" | "warning" | "error";
+
+export interface ToastEntry extends FriendlyErrorDisplay {
+  id: number;
+  /** Visual tone. Error entries derive it from severity; success/info
+   *  toasts set it explicitly. Optional for backward compat with entries
+   *  created before the tone field existed. */
+  tone?: ToastTone;
+}
 
 let _nextToastId = 1;
 const _toastSubs = new Set<(toasts: ToastEntry[]) => void>();
@@ -213,7 +221,51 @@ export function showFriendlyError(err: unknown): number {
   const display = useFriendlyError(err);
   if (!display) return -1;
   const id = _nextToastId++;
-  _toasts = [..._toasts, { ...display, id }];
+  const tone: ToastTone =
+    display.severity === "error" ? "error" : display.severity === "warning" ? "warning" : "info";
+  _toasts = [..._toasts, { ...display, id, tone }];
+  _publish();
+  return id;
+}
+
+/** Success feedback for a completed action (saved / created / launched...).
+ *  Part of the app-wide interaction contract: every mutation gets an
+ *  audible "回响" — success toast or error toast, never silence. */
+export function showSuccess(message: string): number {
+  const id = _nextToastId++;
+  _toasts = [
+    ..._toasts,
+    {
+      id,
+      tone: "success",
+      title: message,
+      body: "",
+      action: null,
+      actionKey: null,
+      debug: null,
+      severity: "info",
+    },
+  ];
+  _publish();
+  return id;
+}
+
+/** Neutral informational toast (e.g. "任务已在后台继续"). */
+export function showInfo(message: string): number {
+  const id = _nextToastId++;
+  _toasts = [
+    ..._toasts,
+    {
+      id,
+      tone: "info",
+      title: message,
+      body: "",
+      action: null,
+      actionKey: null,
+      debug: null,
+      severity: "info",
+    },
+  ];
   _publish();
   return id;
 }

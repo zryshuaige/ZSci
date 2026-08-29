@@ -30,7 +30,7 @@ import {
   FileText,
   RefreshCcw,
   type LucideIcon,
-} from "lucide-react";
+} from "@/components/ui/icons";
 import { cn } from "@/lib/cn";
 import type { ExperimentStage } from "@/lib/api";
 import {
@@ -174,7 +174,15 @@ export function FivePhaseStepper({
                 )}
               >
                 {status === "completed" || status === "approved" ? (
-                  <CheckCircle2 className={cn(variant === "compact" ? "h-3 w-3" : "h-4 w-4", meta.color)} />
+                  <CheckCircle2
+                    className={cn(
+                      variant === "compact" ? "h-3 w-3" : "h-4 w-4",
+                      // Completed reads as a signal-blue check in the
+                      // precision-instrument language; approved keeps its
+                      // status-tone chip color.
+                      status === "completed" ? "text-primary" : meta.color,
+                    )}
+                  />
                 ) : status === "running" ? (
                   <Loader2 className={cn("animate-spin", variant === "compact" ? "h-3 w-3" : "h-4 w-4", meta.color)} />
                 ) : (
@@ -196,10 +204,7 @@ export function FivePhaseStepper({
             {!isLast && (
               <div
                 aria-hidden
-                className={cn(
-                  "w-2 self-center h-px",
-                  status === "completed" ? "bg-green-300" : "bg-border",
-                )}
+                className="w-2 self-center h-px bg-border"
               />
             )}
           </li>
@@ -219,8 +224,3 @@ export function FivePhaseStepper({
  * the key isn't in `STAGE_USER_VIEW` (which would only happen for
  * legacy atomic stage keys like `stage_0_init`).
  */
-export function phaseNameZh(phaseItems: PhaseViewItem[], key: string | null | undefined): string {
-  if (!key) return "";
-  const hit = phaseItems.find((p) => p.key === key);
-  return hit?.name ?? key;
-}

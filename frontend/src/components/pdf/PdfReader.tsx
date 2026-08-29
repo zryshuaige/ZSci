@@ -1,8 +1,9 @@
 import * as pdfjsLib from "pdfjs-dist";
 import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ChevronDown } from "lucide-react";
+import { ChevronDown } from "@/components/ui/icons";
 import type { Annotation } from "@/lib/api";
+import { Dropdown, DropdownItem } from "@/components/ui/Dropdown";
 import { cn } from "@/lib/cn";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
@@ -64,7 +65,6 @@ export default function PdfReader({
   const [currentPage, setCurrentPage] = useState(1);
   const [selection, setSelection] = useState<Selection | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [presetOpen, setPresetOpen] = useState(false);
   // The effective render scale: manual override wins, else auto-fit.
   const renderScale = manualScale ?? fitScale;
   // Track rendered pages so we don't render the same page twice (H2).
@@ -575,47 +575,43 @@ export default function PdfReader({
         >
           −
         </button>
-        {/* Zoom preset dropdown: click the percentage to pick fit-width /
-            100% actual size / fit-page. Defaults to a simple reset on the
-            percentage label, with a chevron to signal it's a menu. */}
-        <div className="relative">
-          <button
-            onClick={() => setPresetOpen((v) => !v)}
-            className="h-7 px-2 inline-flex items-center gap-0.5 rounded-full text-xs tabular-nums text-muted-foreground hover:bg-muted hover:text-foreground transition-colors duration-sm ease-out"
-            title="缩放预设"
-          >
-            {zoomPct}%
-            <ChevronDown className="h-3 w-3" />
-          </button>
-          {presetOpen && (
+        {/* Zoom preset menu (shared Dropdown primitive): click the percentage
+            to pick fit-width / 100% actual size / fit-page. Opens downward. */}
+        <Dropdown
+          menuClassName="w-40"
+          trigger={
+            <button
+              className="h-7 px-2 inline-flex items-center gap-0.5 rounded-full text-xs tabular-nums text-muted-foreground hover:bg-muted hover:text-foreground transition-colors duration-sm ease-out"
+              title="缩放预设"
+            >
+              {zoomPct}%
+              <ChevronDown className="h-3 w-3" />
+            </button>
+          }
+        >
+          {(close) => (
             <>
-              <div className="fixed inset-0 z-dropdown" onClick={() => setPresetOpen(false)} />
-              <div className="absolute left-1/2 -translate-x-1/2 bottom-full mb-2 z-dropdown w-40 rounded-xl border border-border bg-card shadow-float p-1.5 animate-pop origin-bottom">
-                <button
-                  onClick={() => { setManualScale(null); setRailCollapsed(false); setPresetOpen(false); }}
-                  className="w-full text-left rounded-lg px-3 py-2 text-xs hover:bg-muted transition-colors duration-sm ease-out"
-                >
+              <DropdownItem onClick={() => { setManualScale(null); setRailCollapsed(false); close(); }}>
+                <div className="text-xs">
                   适合宽度
                   <span className="text-muted-foreground block">贴合面板宽度</span>
-                </button>
-                <button
-                  onClick={() => { zoomTo(1.0); setPresetOpen(false); }}
-                  className="w-full text-left rounded-lg px-3 py-2 text-xs hover:bg-muted transition-colors duration-sm ease-out"
-                >
+                </div>
+              </DropdownItem>
+              <DropdownItem onClick={() => { zoomTo(1.0); close(); }}>
+                <div className="text-xs">
                   实际大小
                   <span className="text-muted-foreground block">100%</span>
-                </button>
-                <button
-                  onClick={() => { zoomToFitPage(); setPresetOpen(false); }}
-                  className="w-full text-left rounded-lg px-3 py-2 text-xs hover:bg-muted transition-colors duration-sm ease-out"
-                >
+                </div>
+              </DropdownItem>
+              <DropdownItem onClick={() => { zoomToFitPage(); close(); }}>
+                <div className="text-xs">
                   适合页面
                   <span className="text-muted-foreground block">整页可见</span>
-                </button>
-              </div>
+                </div>
+              </DropdownItem>
             </>
           )}
-        </div>
+        </Dropdown>
         <button
           onClick={() => zoomIn()}
           className="h-7 w-7 inline-flex items-center justify-center rounded-full text-muted-foreground hover:bg-muted hover:text-foreground transition-colors duration-sm ease-out active:scale-90"

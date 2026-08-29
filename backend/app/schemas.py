@@ -914,21 +914,6 @@ class BenchmarkSearchResponse(ZSciBaseModel):
     query_used: list[str] = Field(default_factory=list)
 
 
-class CodegenRequest(ZSciBaseModel):
-    selected_papers: list[str] = Field(default_factory=list)
-    selected_repositories: list[str] = Field(default_factory=list)
-
-
-class CodegenResponse(ZSciBaseModel):
-    relevant_papers: list[str] = Field(default_factory=list)
-    official_code_note: str = ""
-    plan: list[dict] = Field(default_factory=list)
-    files_written: list[str] = Field(default_factory=list)
-    run_command: str
-    smoke_command: str
-    risks: list[str] = Field(default_factory=list)
-
-
 # ---------------------------------------------------------------------------
 # Phase 4: writing
 # ---------------------------------------------------------------------------

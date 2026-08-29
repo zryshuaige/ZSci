@@ -1,29 +1,31 @@
-// Global friendly-error toast renderer.
+// Global toast renderer — success / info / warning / error.
 //
 // Mounts once in the Layout (frontend/src/components/Layout.tsx). Reads the
 // toast queue from useFriendlyErrorToasts and renders each entry at the
-// bottom-right of the screen. Auto-dismiss after 6s. Clicking the action
-// dispatches a custom DOM event ("friendly-error-action:{key}") that the
-// page can listen for (e.g. navigating to /settings on "go_settings").
+// bottom-right of the screen. Errors auto-dismiss after 6s, success/info
+// after 3.5s. Clicking the action dispatches a custom DOM event
+// ("friendly-error-action:{key}") that the page can listen for (e.g.
+// navigating to /settings on "go_settings").
 //
 // Why a DOM event instead of a callback prop: the Layout already has the
 // router mounted; if the toast rendered a Settings Link we'd couple the
 // toast to the router directly. A CustomEvent lets each page choose how
 // to handle "go_settings" / "retry" without re-wiring Layout.
 
-import { CheckCircle2, AlertTriangle, Info, X } from "lucide-react";
+import { CheckCircle2, AlertTriangle, Info, X } from "@/components/ui/icons";
 import { useNavigate } from "react-router-dom";
 import { useEffect } from "react";
 import {
   dismissToast,
-  type FriendlyErrorDisplay,
   useFriendlyErrorToasts,
+  type ToastEntry,
 } from "@/lib/useFriendlyError";
+import { TONE_CLASSES } from "@/lib/statusMeta";
 import { cn } from "@/lib/cn";
 
-/** Dispatched by ErrorToast when the user clicks the action button. Listened
- *  to by individual pages that want custom behaviour (e.g. re-running a
- *  failed mutation). The event target is `window`. */
+/** Dispatched by the toast host when the user clicks the action button.
+ *  Listened to by individual pages that want custom behaviour (e.g.
+ *  re-running a failed mutation). The event target is `window`. */
 export const FRIENDLY_ERROR_ACTION_EVENT = "friendly-error-action";
 
 function dispatchAction(key: string, id: number) {
@@ -32,52 +34,69 @@ function dispatchAction(key: string, id: number) {
   );
 }
 
-interface ToastProps {
-  entry: FriendlyErrorDisplay & { id: number };
-  onAction: (key: string) => void;
-  onDismiss: (id: number) => void;
+type Tone = NonNullable<ToastEntry["tone"]>;
+
+/** Toast kinds map onto the shared status tones — one color source of truth
+ *  (statusMeta.TONE_CLASSES) instead of a local hardcoded palette. */
+const TONE_MAP = {
+  success: "green",
+  info: "blue",
+  warning: "amber",
+  error: "red",
+} as const satisfies Record<Tone, keyof typeof TONE_CLASSES>;
+
+const ICONS: Record<Tone, typeof Info> = {
+  success: CheckCircle2,
+  info: Info,
+  warning: AlertTriangle,
+  error: AlertTriangle,
+};
+
+function toneOf(entry: ToastEntry): Tone {
+  if (entry.tone) return entry.tone;
+  // Backward compat: entries created before `tone` existed.
+  return entry.severity === "error" ? "error" : entry.severity === "warning" ? "warning" : "info";
 }
 
-function Toast({ entry, onAction, onDismiss }: ToastProps) {
-  // Auto-dismiss after 6s. Reset the timer when the entry changes.
+function Toast({ entry, onAction, onDismiss }: {
+  entry: ToastEntry;
+  onAction: (key: string) => void;
+  onDismiss: (id: number) => void;
+}) {
+  const tone = toneOf(entry);
+  // Errors linger (they carry actionable info); success/info confirm and go.
+  const ttl = tone === "error" || tone === "warning" ? 6000 : 3500;
   useEffect(() => {
-    const t = setTimeout(() => onDismiss(entry.id), 6000);
+    const t = setTimeout(() => onDismiss(entry.id), ttl);
     return () => clearTimeout(t);
-  }, [entry.id, onDismiss]);
+  }, [entry.id, ttl, onDismiss]);
 
-  const Icon = entry.severity === "info" ? Info : entry.severity === "error" ? AlertTriangle : Info;
-  // For success-class we'd render CheckCircle2; we don't currently use it
-  // but the import is left for future use (e.g. positive "已采纳" toasts).
-  const _CheckIcon = CheckCircle2;
-
-  const palette =
-    entry.severity === "error"
-      ? { bg: "bg-red-50", border: "border-red-300", icon: "text-red-600", text: "text-red-800" }
-      : entry.severity === "warning"
-      ? { bg: "bg-amber-50", border: "border-amber-300", icon: "text-amber-600", text: "text-amber-800" }
-      : { bg: "bg-blue-50", border: "border-blue-300", icon: "text-blue-600", text: "text-blue-800" };
+  const Icon = ICONS[tone];
+  const toneClasses = TONE_CLASSES[TONE_MAP[tone]];
 
   return (
     <div
       role="status"
       data-friendly-error-toast
       className={cn(
-        "w-80 rounded-lg border bg-card p-3 shadow-float animate-pop",
-        palette.border,
+        "w-80 rounded-xl p-3 shadow-float animate-pop",
+        toneClasses.soft,
       )}
     >
       <div className="flex items-start gap-2">
-        <Icon className={cn("h-4 w-4 mt-0.5 shrink-0", palette.icon)} />
+        <Icon className={cn("h-4 w-4 mt-0.5 shrink-0", toneClasses.text)} />
         <div className="flex-1 min-w-0">
-          <div className={cn("text-sm font-medium", palette.text)}>{entry.title}</div>
-          <div className="mt-1 text-xs text-foreground/80 break-words">{entry.body}</div>
+          <div className={cn("text-sm font-medium", toneClasses.text)}>{entry.title}</div>
+          {entry.body && (
+            <div className="mt-1 text-xs text-foreground/80 break-words">{entry.body}</div>
+          )}
           {(entry.action && entry.actionKey) ? (
             <button
               type="button"
               className={cn(
                 "mt-2 inline-flex items-center rounded-md border px-2 py-1 text-xs font-medium transition-colors",
-                palette.border,
-                palette.text,
+                toneClasses.border,
+                toneClasses.text,
                 "hover:bg-card",
               )}
               onClick={() => onAction(entry.actionKey!)}

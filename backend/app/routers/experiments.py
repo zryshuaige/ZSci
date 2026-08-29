@@ -22,10 +22,6 @@ from app.experiments.benchmarks import (
     store_benchmark_hit,
 )
 from app.experiments.codegen import generate_experiment_code
-from app.experiments.orchestrator import (
-    run_autonomous_experiment,
-    run_autonomous_experiment_v2,
-)
 from app.experiments.runner import run_experiment, stop_run, tail_log
 from app.experiments.scaffold import scaffold_experiment
 from app.llm.gateway import ModelNotConfigured
@@ -38,8 +34,6 @@ from app.schemas import (
     BenchmarkSearchResponse,
     BenchmarkUpdate,
     BranchOut,
-    CodegenRequest,
-    CodegenResponse,
     ExperimentCreate,
     ExperimentOut,
     ExperimentStageDecision,
@@ -550,12 +544,22 @@ def list_stages(exp_id: str, db: Session = Depends(get_db)) -> StageProgressOut:
     # `experiment.autonomous_run` row in the system — otherwise a second
     # in-flight experiment hijacks the first's checkpoint_summary.
     pending_task = _find_autonomous_task_for_experiment(db, exp_id)
+    checkpoint_stage_key: str | None = None
     if pending_task is not None:
-        if pending_task.status == "running" and pending_task.checkpoint_payload_json:
+        # `_open_checkpoint` flips the task to `awaiting_approval` while the
+        # user is looking at the confirm card (startup recovery may leave it
+        # `running` with a payload). Both states mean checkpoint_payload_json
+        # is the live summary. Restricting to "running" made the summary
+        # invisible exactly when the user needed it — an empty confirm card.
+        if (
+            pending_task.status in ("running", "awaiting_approval")
+            and pending_task.checkpoint_payload_json
+        ):
             try:
                 checkpoint_summary = json.loads(pending_task.checkpoint_payload_json)
             except (ValueError, TypeError):
                 checkpoint_summary = None
+        checkpoint_stage_key = pending_task.stage_key
         if pending_task.status == "failed":
             # Prefer AgentTask.error (set by the orchestrator's friendly
             # handler); fall back to the most recent kind="error" event.
@@ -586,10 +590,13 @@ def list_stages(exp_id: str, db: Session = Depends(get_db)) -> StageProgressOut:
 
     stage_outs = []
     for r in rows:
-        # Only the active checkpoint gets the summary.
+        # Only the active checkpoint gets the summary, and only the stage the
+        # task is actually blocked on (guards against a stale payload leaking
+        # to a different phase row).
         this_summary = (
             checkpoint_summary
             if r.status == "waiting_for_user"
+            and (checkpoint_stage_key is None or checkpoint_stage_key == r.stage_key)
             else None
         )
         stage_outs.append(_stage_row_to_out(r, checkpoint_summary=this_summary))
@@ -651,45 +658,47 @@ def _decision_history(exp: Experiment) -> list[dict]:
     "/api/v1/experiments/{exp_id}/decide",
     response_model=ExperimentStageDecisionOut,
 )
-def decide_stage(
+async def decide_stage(
     exp_id: str, payload: ExperimentStageDecision, db: Session = Depends(get_db)
 ) -> ExperimentStageDecisionOut:
     """Resolve a pending checkpoint on the experiment's current phase.
 
-    The orchestrator, when it blocks at a `requires_user` checkpoint, writes
-    an `Approval` row (status=pending) with `action_type=experiment.stage.<k>`
-    and sets `AgentTask.checkpoint_payload_json`. This endpoint:
-
-      1. Finds the running AgentTask for this experiment (its pending Approval).
-      2. Writes the decision into the Approval's payload_json +
-         status (approved/rejected), and into the experiment's
-         decision_history_json.
-      3. Applies the per-decision side effect:
-       - approve: leave the phase completed, unblock the orchestrator.
-       - edit: stash `decision_payload` into the Approval payload so the
-         orchestrator's `edit` branch overrides the phase outputs.
-       - skip: mark phase skipped + downstream outdated.
-       - abort: mark phase needs_revision + orchestrator stops.
-      4. Resume the orchestrator (set the asyncio pause event).
-
-    Note: fork / select_resume_point / redo are intentionally NOT exposed
-    here. The fork endpoint still exists (`/fork`) for the backend API,
-    but the UI no longer surfaces those buttons.
+    1. Finds this experiment's autonomous task (running OR awaiting_approval
+       — the latter is the state while the orchestrator blocks at a
+       checkpoint, including one adopted after a process restart).
+    2. Writes the decision into the pending Approval row (the durable
+       signal the orchestrator loop polls).
+    3. Applies the decision's state transitions SYNCHRONOUSLY via
+       ``apply_stage_decision`` so the very next /stages refetch (including
+       the front-end's optimistic update) sees the post-decision state.
+    4. Wakes the live loop, or relaunches it (post-restart: no live
+       coroutine exists — the loop adopts the checkpoint and continues from
+       the resolved decision).
     """
     from app.db.models import AgentTask, Approval, ExperimentStage
-    from app.experiments.orchestrator import resume_experiment
-    from app.experiments.stages import mark_downstream_outdated
+    from app.experiments.orchestrator import (
+        apply_stage_decision,
+        relaunch_experiment_loop,
+        resume_experiment,
+    )
 
     exp = db.get(Experiment, exp_id)
     if exp is None:
         raise HTTPException(404, "Experiment not found")
 
-    # The running autonomous task owns the pending checkpoint. Bug fix (M31):
-    # scope to THIS experiment's task (parsed from input_json) so multiple
-    # concurrent experiments don't cross-decide each other.
-    task = _find_autonomous_task_for_experiment(db, exp_id)
-    if task is None or task.status != "running":
-        raise HTTPException(409, "没有正在运行的自主实验任务,无法决策")
+    # Only live states count here — a newer failed/completed task must not
+    # shadow an older awaiting_approval one (legacy duplicate rows from
+    # before the start_autonomous concurrency guard). Prefer the parked
+    # task when both exist: it's the one holding the pending checkpoint.
+    task = _find_autonomous_task_for_experiment(
+        db, exp_id, statuses=("awaiting_approval",)
+    ) or _find_autonomous_task_for_experiment(db, exp_id, statuses=("running",))
+    if task is None or task.status not in ("running", "awaiting_approval"):
+        raise HTTPException(409, "没有正在等待决策的自主实验任务")
+    # `awaiting_approval` = parked at a checkpoint by the (new) loop. If no
+    # live coroutine backs it in THIS process, the process restarted since
+    # the checkpoint was written and the loop must be relaunched.
+    task_was_parked = task.status == "awaiting_approval"
 
     approval = db.scalar(
         select(Approval).where(
@@ -707,7 +716,7 @@ def decide_stage(
         if tgt is not None:
             target_stage_key = tgt.stage_key
 
-    # Merge decision into the approval payload (enrich + set status).
+    # Write the decision into the Approval row — the loop's durable signal.
     try:
         apv_payload = json.loads(approval.payload_json) if approval.payload_json else {}
     except (ValueError, TypeError):
@@ -716,53 +725,21 @@ def decide_stage(
     apv_payload["decision_payload"] = payload.payload or {}
     apv_payload["target_stage_key"] = target_stage_key
     approval.payload_json = json.dumps(apv_payload, ensure_ascii=False)
-    # Map abort -> rejected (the orchestrator reads status=rejected as abort);
-    # everything else counts as approved (the decision_kind carries nuance).
     approval.status = "rejected" if decision == "abort" else "approved"
     approval.decision_at = datetime.now(UTC)
 
-    # Apply per-decision side effects (only the 4 surfaced in the UI).
-    #
-    # Iteration 4 fix: we transition the stage row + overall_status HERE,
-    # synchronously, before waking the orchestrator. Previously only
-    # `approval.status` flipped and the orchestrator was left to advance
-    # the stage asynchronously - but for `approve` the orchestrator never
-    # re-marked the current stage at all (it falls through to the next
-    # phase), so the row stayed `waiting_for_user` forever and
-    # `GET /stages` kept returning it. The front-end's `variantFor` treats
-    # any `waiting_for_user` stage as "show the 等待你的确认 hero", so the
-    # page was stuck on "等待你的确认" even after the user clicked 确认.
-    # Advancing the state here means the very next `listStages` refetch
-    # (including the one triggered by the front-end's optimistic update)
-    # sees the post-decision state instead of stale `waiting_for_user`.
-    stage_row = db.scalar(
-        select(ExperimentStage).where(
-            ExperimentStage.experiment_id == exp_id,
-            ExperimentStage.stage_key == target_stage_key,
-        )
+    # Apply transitions synchronously (single authority: apply_stage_decision).
+    apply_stage_decision(
+        db,
+        experiment_id=exp_id,
+        task_id=task.id,
+        stage_key=target_stage_key,
+        decision=decision,
+        decision_payload=payload.payload or {},
     )
-    if decision == "skip":
-        if stage_row is not None:
-            stage_row.status = "skipped"
-            mark_downstream_outdated(db, exp_id, target_stage_key, invalidated_by_stage_id=stage_row.id)
-        exp.overall_status = "running"
-    elif decision == "abort":
-        if stage_row is not None:
-            stage_row.status = "needs_revision"
-        exp.overall_status = "paused"
-    else:
-        # approve / edit: the phase already ran successfully before the
-        # checkpoint (the orchestrator marked it `completed`, then the
-        # checkpoint overwrote it to `waiting_for_user`). Confirming the
-        # decision restores `completed`. For `edit` the orchestrator
-        # overwrites outputs_json with the user's edited payload right
-        # after it wakes; the status stays `completed`.
-        if stage_row is not None:
-            stage_row.status = "completed"
-        exp.overall_status = "running"
+    task.status = "running" if decision != "abort" else "stopped"
 
-    # Append to the experiment's decision history trail (with explicit Z so
-    # the front-end parses in the user's local timezone).
+    # Decision history trail.
     history = _decision_history(exp)
     history.append({
         "stage_key": target_stage_key,
@@ -775,9 +752,13 @@ def decide_stage(
 
     db.commit()
 
-    # Wake the orchestrator's checkpoint poll (unless abort, which the
-    # orchestrator detects via status=rejected).
-    resume_experiment(task.id)
+    # Wake the live loop, or relaunch it when this process has none and the
+    # task was parked at the checkpoint (post-restart resume).
+    if task_was_parked:
+        if not relaunch_experiment_loop(task):
+            resume_experiment(task.id)
+    else:
+        resume_experiment(task.id)
 
     return ExperimentStageDecisionOut(
         ok=True,
@@ -980,64 +961,6 @@ def remove_benchmark(benchmark_id: str, db: Session = Depends(get_db)) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Phase B: code generation. The autonomous agent calls generate_experiment_code
-# directly; this endpoint surfaces it for manual / preview use and Phase D will
-# store the generated run/smoke commands on the experiment for later steps.
-# ---------------------------------------------------------------------------
-
-
-@router.post("/api/v1/experiments/{exp_id}/generate-code", response_model=CodegenResponse)
-def generate_code(
-    exp_id: str, payload: CodegenRequest, db: Session = Depends(get_db)
-) -> CodegenResponse:
-    exp = db.get(Experiment, exp_id)
-    if exp is None:
-        raise HTTPException(404, "Experiment not found")
-    project = db.get(Project, exp.project_id)
-    if project is None:
-        raise HTTPException(404, "Project not found")
-    try:
-        result = generate_experiment_code(
-            db,
-            _ws,
-            experiment=exp,
-            project=project,
-            selected_papers=payload.selected_papers,
-            selected_repositories=payload.selected_repositories,
-        )
-    except ModelNotConfigured as exc:
-        db.rollback()
-        raise HTTPException(503, str(exc)) from exc
-    except ValueError as exc:
-        db.rollback()
-        raise HTTPException(422, str(exc)) from exc
-    # Persist the run/smoke commands + plan on the experiment so the orchestrator
-    # (Phase D) and the detail page can pick them up without re-generating.
-    exp.plan_json = json.dumps(
-        {
-            "relevant_papers": result["relevant_papers"],
-            "official_code_note": result["official_code_note"],
-            "plan": result["plan"],
-            "run_command": result["run_command"],
-            "smoke_command": result["smoke_command"],
-            "risks": result["risks"],
-        },
-        ensure_ascii=False,
-    )
-    exp.status = "generated"
-    db.commit()
-    db.refresh(exp)
-    return CodegenResponse(
-        relevant_papers=result["relevant_papers"],
-        official_code_note=result["official_code_note"],
-        plan=result["plan"],
-        files_written=result["files_written"],
-        run_command=result["run_command"],
-        smoke_command=result["smoke_command"],
-        risks=result["risks"],
-    )
-
-
 # ---------------------------------------------------------------------------
 # Phase D: autonomous experiment agent. Launches a background orchestrator that
 # runs benchmarks -> codegen -> smoke (self-fix) -> experiment runs -> finalize,
@@ -1114,10 +1037,32 @@ async def start_autonomous(
             "你可以在实验设置里补充,或在启动时直接填写。",
         )
 
+    # Concurrency guard: ONE live autonomous task per experiment. Without
+    # this, a retried/duplicated POST (e.g. client-side timeout while the
+    # server processed the first request) creates a second AgentTask, and
+    # the newest-first lookup in _find_autonomous_task_for_experiment then
+    # shadows the older awaiting_approval task — bricking /decide for the
+    # pending checkpoint (observed in smoke testing).
+    live_task = db.scalar(
+        select(AgentTask)
+        .where(
+            AgentTask.task_type == "experiment.autonomous_run",
+            AgentTask.experiment_id == exp_id,
+            AgentTask.status.in_(("running", "awaiting_approval")),
+        )
+        .order_by(AgentTask.created_at.desc())
+        .limit(1)
+    )
+    if live_task is not None:
+        raise HTTPException(
+            409,
+            "该实验已有正在进行的自主实验任务,"
+            "请等待其完成或先在详情页处理待确认的环节。",
+        )
+
     input_data = {
-        # experiment_id is stored here (not a FK column on agent_tasks - create_all
-        # doesn't alter existing tables) so GET /workflows/active can deep-link the
-        # sidebar entry back to this experiment.
+        # experiment_id is ALSO on the task row (real column) for direct
+        # queries; kept in input_json for API backward-compat.
         "experiment_id": exp_id,
         "mode": mode,
         "research_question": rq,
@@ -1138,42 +1083,36 @@ async def start_autonomous(
         id=new_id("task"),
         project_id=project.id,
         task_type="experiment.autonomous_run",
+        experiment_id=exp_id,
         input_json=json.dumps(input_data, ensure_ascii=False),
         status="running",
     )
     db.add(task)
     db.commit()
 
-    # Pick the orchestrator entry point based on `mode`. The 9-stage
-    # `run_autonomous_experiment_v2` walks STAGE_REGISTRY + checkpoints at
-    # each stage that requires_user; the legacy `run_autonomous_experiment`
-    # is preserved for `?mode=auto`.
-    runner = (
-        run_autonomous_experiment_v2
-        if mode == "interactive"
-        else run_autonomous_experiment
+    # Launch the loop in the background via the dispatcher (tracked, no
+    # double-launch). `?mode=auto` runs the SAME loop — checkpoints simply
+    # auto-approve (see run_experiment_loop).
+    from app.agent import dispatch
+    from app.experiments.orchestrator import run_experiment_loop
+
+    bg = dispatch.dispatch(
+        task.id,
+        run_experiment_loop(
+            task_id=task.id,
+            experiment_id=exp_id,
+            project_id=project.id,
+            input_data=input_data,
+        ),
+        name=f"zsci-exp-{task.id}",
     )
 
-    # Fire-and-forget the background orchestrator. It opens its own sessions
-    # and commits events as it goes; the SSE stream on /agent/tasks/{id}/stream
-    # surfaces them live. The orchestrator's own try/except marks the task
-    # failed on any stage error; the done_callback is a backstop for failures
-    # that escape that (e.g. an error before the try, or a CancelledError) so
-    # the task row never gets stuck in "running" with no terminal event.
     def _on_done(t: asyncio.Task) -> None:
         if t.cancelled():
             _mark_terminal(task.id, "stopped", "autonomous task cancelled")
         elif t.exception() and not isinstance(t.exception(), asyncio.CancelledError):
             _mark_terminal(task.id, "failed", f"orchestrator crashed: {t.exception()}")
 
-    bg = asyncio.create_task(
-        runner(
-            task_id=task.id,
-            experiment_id=exp_id,
-            project_id=project.id,
-            input_data=input_data,
-        )
-    )
     bg.add_done_callback(_on_done)
     return {"task_id": task.id, "experiment_id": exp_id, "mode": mode}
 
@@ -1250,7 +1189,8 @@ def list_experiment_files(exp_id: str, db: Session = Depends(get_db)) -> dict:
             continue
         if any(part in skip_dirs for part in p.relative_to(exp_root).parts):
             continue
-        files.append(str(p.relative_to(exp_root)))
+        # POSIX separators — the API contract is OS-independent.
+        files.append(p.relative_to(exp_root).as_posix())
     return {"files": files}
 
 
@@ -1312,22 +1252,40 @@ def _latest_stage_outputs(
 
 
 def _find_autonomous_task_for_experiment(
-    db: Session, experiment_id: str
+    db: Session,
+    experiment_id: str,
+    statuses: tuple[str, ...] = ("running", "awaiting_approval", "failed", "completed", "stopped"),
 ) -> AgentTask | None:
     """Find the most recent `experiment.autonomous_run` task for THIS experiment.
 
-    Bug fix (M31): the previous implementation picked ANY `experiment.autonomous_run`
-    AgentTask with `status='running'` across all experiments, which misroutes
-    /decide + /stages.checkpoint_summary when the user has more than one
-    in-flight experiment. The orchestrator writes `experiment_id` into
-    `input_json` (no FK column on `agent_tasks` per create_all dev convention);
-    we parse it here and filter.
+    Uses the real `agent_tasks.experiment_id` column, falling back to parsing
+    `input_json` for rows written before the column existed (backfilled at
+    startup, but a dev DB may lag).
+
+    `statuses` narrows which lifecycle states count. /decide passes only the
+    live states so a newer FAILED task can never shadow an older
+    awaiting_approval one (that combination bricked checkpoint decisions
+    before the start_autonomous concurrency guard existed).
     """
+    direct = db.scalar(
+        select(AgentTask)
+        .where(
+            AgentTask.task_type == "experiment.autonomous_run",
+            AgentTask.experiment_id == experiment_id,
+            AgentTask.status.in_(statuses),
+        )
+        .order_by(AgentTask.created_at.desc())
+        .limit(1)
+    )
+    if direct is not None:
+        return direct
+    # Legacy rows without the column: parse input_json (bounded scan).
     candidates = db.scalars(
         select(AgentTask)
         .where(
             AgentTask.task_type == "experiment.autonomous_run",
-            AgentTask.status.in_(("running", "failed", "completed", "stopped")),
+            AgentTask.experiment_id.is_(None),
+            AgentTask.status.in_(statuses),
         )
         .order_by(AgentTask.created_at.desc())
         .limit(50)

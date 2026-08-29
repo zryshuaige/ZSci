@@ -11,12 +11,13 @@
 
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { ArrowRight, FileText, GitBranch, Loader2, Sparkles } from "lucide-react";
-import { api, fmtTime } from "@/lib/api";
+import { ArrowRight, FileText, GitBranch, Loader2, Sparkles, AlertTriangle, RotateCw } from "@/components/ui/icons";
+import { api, fmtTime, qk } from "@/lib/api";
 import { showFriendlyError } from "@/lib/useFriendlyError";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Spinner } from "@/components/ui/Dialog";
+import WizardBar from "@/components/WizardBar";
 
 
 /** 后端 /next-steps 返回的形状 — 用 ReturnType 自动对齐 api.nextSteps 的定义。 */
@@ -35,8 +36,14 @@ export default function ExperimentResultPage() {
   const navigate = useNavigate();
 
   const expQuery = useQuery({
-    queryKey: ["experiment", expId],
+    queryKey: qk.experiments.one(expId!),
     queryFn: () => api.getExperiment(expId!),
+    enabled: !!expId,
+  });
+
+  const { data: stageProgress } = useQuery({
+    queryKey: qk.experiments.stages(expId!),
+    queryFn: () => api.listStages(expId!),
     enabled: !!expId,
   });
 
@@ -63,7 +70,12 @@ export default function ExperimentResultPage() {
         });
       });
     },
-    onSuccess: (newExp) => navigate(`/experiments/${newExp.id}/preview`),
+    onSuccess: (newExp) =>
+      navigate(
+        expQuery.data
+          ? `/projects/${expQuery.data.project_id}/experiments/${newExp.id}/preview`
+          : `/experiments/${newExp.id}/preview`,
+      ),
     onError: (err) => showFriendlyError(err),
   });
 
@@ -77,11 +89,73 @@ export default function ExperimentResultPage() {
     );
   }
 
+  if (expQuery.isError || !expQuery.data) {
+    return (
+      <div className="p-8 max-w-3xl mx-auto">
+        <Card className="p-6 text-center space-y-3">
+          <AlertTriangle className="mx-auto h-6 w-6 text-destructive/70" />
+          <div className="text-sm text-muted-foreground">实验信息加载失败</div>
+          <div className="flex justify-center gap-2">
+            <Button size="sm" variant="outline" onClick={() => expQuery.refetch()}>
+              <RotateCw className="h-3.5 w-3.5" /> 重试
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => navigate("/")}>
+              返回项目列表
+            </Button>
+          </div>
+        </Card>
+      </div>
+    );
+  }
+
   const exp = expQuery.data;
+  const detailPath = `/projects/${exp.project_id}/experiments/${exp.id}`;
+  // 返回想法列表：带研究问题作为 idea 参数，避免落入候选屏空态死胡同。
+  const ideasQuery = exp.research_question || exp.hypothesis || "";
+  const ideasPath = `/projects/${exp.project_id}/explore/ideas${
+    ideasQuery ? `?idea=${encodeURIComponent(ideasQuery)}` : ""
+  }`;
   const next = nextQuery.data;
+
+  // 结果页此前对所有实验都渲染「已完成」模板 —— 失败/等待/进行中的实验
+  // 会看到谎言式结论。按真实状态分支：只有 completed 才展示结论页。
+  const overall = stageProgress?.overall_status ?? exp.status;
+  const isCompleted = overall === "completed";
+  const isFailed = overall === "failed";
+  const isWaiting = overall === "waiting_user";
+  const isRunning = !isCompleted && !isFailed && !isWaiting;
+  const failedStage = stageProgress?.stages.find((s) => s.status === "failed");
+  const failureReason = stageProgress?.last_error || failedStage?.description;
+  // 向导条如实反映进度：已完成几个阶段就在第几步（封顶 4）。
+  const doneCount = stageProgress?.stages.filter((s) => s.status === "completed").length ?? 0;
+  const wizardCurrent = isCompleted ? 4 : Math.min(doneCount + 1, 4);
+
+  // 非完成态的统一提示卡：说清现状 + 一个明确的下一步。
+  const statusBanner = isFailed
+    ? {
+        title: "实验中途失败",
+        desc: `在「${failedStage?.stage_name_zh ?? "执行"}」阶段遇到了问题${
+          failureReason ? `:${failureReason.replace(/[。.]?\s*$/, "。")}` : "。"
+        }可以去实验详情查看详细原因,或让系统自动修复后继续。`,
+        cta: "回实验详情处理",
+      }
+    : isWaiting
+      ? {
+          title: "实验在等你确认",
+          desc: "流程已停在某个关键节点,需要你确认后才会继续往下走。",
+          cta: "去确认并继续",
+        }
+      : isRunning
+        ? {
+            title: "实验还在进行中",
+            desc: "各阶段还没有全部跑完,结论和指标要等实验完成后才会出现在这里。",
+            cta: "查看实时进度",
+          }
+        : null;
 
   return (
     <div className="p-8 max-w-3xl mx-auto space-y-5">
+      <WizardBar projectId={exp.project_id} current={wizardCurrent} />
       {/* Header */}
       <div className="space-y-1">
         <div className="text-xs text-muted-foreground">
@@ -89,14 +163,31 @@ export default function ExperimentResultPage() {
         </div>
         <h1 className="text-xl font-semibold tracking-tight flex items-center gap-2">
           <Sparkles className="h-5 w-5 text-primary" />
-          首轮实验已完成
+          {isCompleted ? "首轮实验已完成" : "本轮实验还没有结论"}
         </h1>
-        <p className="text-sm text-muted-foreground">
-          以下汇总本轮实验的初步结论、证据强度与若干后续研究方向,具体判断请结合重复实验与领域知识进一步确认。
-        </p>
+        {isCompleted && (
+          <p className="text-sm text-muted-foreground">
+            以下汇总本轮实验的初步结论、证据强度与若干后续研究方向,具体判断请结合重复实验与领域知识进一步确认。
+          </p>
+        )}
       </div>
 
-      {/* 结论 + 证据强度 */}
+      {/* 非完成态：状态说明 + 主 CTA（不放结论/指标/后续方向等空壳卡） */}
+      {statusBanner && (
+        <Card className="p-5 space-y-3 border-amber-300 bg-amber-50/40">
+          <div className="text-sm font-medium">{statusBanner.title}</div>
+          <div className="text-sm text-muted-foreground leading-relaxed">
+            {statusBanner.desc}
+          </div>
+          <Button onClick={() => navigate(detailPath)}>
+            {statusBanner.cta}
+            <ArrowRight className="h-4 w-4" />
+          </Button>
+        </Card>
+      )}
+
+      {/* 结论 + 证据强度（仅完成态） */}
+      {isCompleted && (
       <Card className="p-5 space-y-3">
         <div className="text-sm text-foreground leading-relaxed">
           {next?.conclusion
@@ -116,9 +207,10 @@ export default function ExperimentResultPage() {
           本轮实验于 {fmtTime(exp?.updated_at)} 记录完成
         </div>
       </Card>
+      )}
 
-      {/* 核心指标 */}
-      {next?.metrics && Object.keys(next.metrics).length > 0 && (
+      {/* 核心指标（仅完成且有分析时） */}
+      {isCompleted && next?.metrics && Object.keys(next.metrics).length > 0 && (
         <Card className="p-5 space-y-2">
           <div className="text-sm font-medium">本轮主要指标</div>
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
@@ -134,7 +226,8 @@ export default function ExperimentResultPage() {
         </Card>
       )}
 
-      {/* 后续研究方向 */}
+      {/* 后续研究方向（仅完成态 —— 未完成的实验不放占位空话卡） */}
+      {isCompleted && (
       <Card className="p-5 space-y-3">
         <div className="text-sm font-medium">后续研究方向</div>
         {next?.next_steps && next.next_steps.length > 0 ? (
@@ -163,7 +256,7 @@ export default function ExperimentResultPage() {
                   <Button
                     size="sm"
                     variant="outline"
-                    onClick={() => navigate(`/experiments/${expId}`)}
+                    onClick={() => navigate(detailPath)}
                   >
                     查看完整记录
                     <ArrowRight className="h-3.5 w-3.5" />
@@ -174,25 +267,33 @@ export default function ExperimentResultPage() {
           </div>
         ) : (
           <div className="text-xs text-muted-foreground leading-relaxed">
-            系统还在整理后续方向,你也可以直接从下方进入实验详情查看完整记录。
+            暂时没有结构化的后续方向建议。你可以打开实验详情查看完整记录,或基于本轮结果开一个新分支继续探索。
           </div>
         )}
       </Card>
+      )}
 
       {/* 主行动 */}
       <div className="flex flex-wrap items-center justify-between gap-2 pt-2">
         <Button
           variant="outline"
           size="sm"
-          onClick={() => navigate("/")}
+          onClick={() => navigate(`/projects/${exp.project_id}/ideas`)}
         >
-          返回研究方向列表
+          返回想法列表
         </Button>
         <div className="flex flex-wrap gap-2">
           <Button
             variant="outline"
             size="sm"
-            onClick={() => navigate(`/experiments/${expId}`)}
+            onClick={() => navigate(ideasPath)}
+          >
+            重新探索方向
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => navigate(detailPath)}
           >
             <FileText className="h-4 w-4" />
             查看完整记录

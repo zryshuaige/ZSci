@@ -1,10 +1,13 @@
 """Small shared utilities: id + slug + time helpers."""
 from __future__ import annotations
 
+import os
 import re
 import unicodedata
 import uuid
+from contextlib import contextmanager
 from datetime import datetime
+from typing import IO, Iterator
 
 
 def new_id(prefix: str) -> str:
@@ -39,3 +42,34 @@ def iso_utc(dt: datetime | None) -> str | None:
     if dt.tzinfo is None:
         return dt.isoformat(timespec="seconds") + "Z"
     return dt.isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+@contextmanager
+def exclusive_file_lock(fobj: IO[str]) -> Iterator[None]:
+    """Exclusive advisory lock on an open file object, cross-platform.
+
+    POSIX uses ``fcntl.flock``; Windows uses ``msvcrt.locking`` (blocks up
+    to ~10s waiting for the lock, matching flock's blocking semantics).
+    Unlock always runs on context exit, including early ``return``.
+    """
+    if os.name == "nt":
+        import msvcrt
+
+        fobj.seek(0)
+        msvcrt.locking(fobj.fileno(), msvcrt.LK_LOCK, 1)
+        try:
+            yield
+        finally:
+            try:
+                fobj.seek(0)
+                msvcrt.locking(fobj.fileno(), msvcrt.LK_UNLCK, 1)
+            except OSError:
+                pass  # lock already released (e.g. handle closed on abnormal exit)
+    else:
+        import fcntl
+
+        fcntl.flock(fobj, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fobj, fcntl.LOCK_UN)

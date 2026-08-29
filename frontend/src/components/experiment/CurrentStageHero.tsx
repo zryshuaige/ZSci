@@ -25,7 +25,7 @@ import {
   AlertTriangle,
   Sparkles,
   CircleDashed,
-} from "lucide-react";
+} from "@/components/ui/icons";
 import { Button } from "@/components/ui/Button";
 import { cn } from "@/lib/cn";
 import { CheckpointCard } from "./CheckpointCard";
@@ -54,23 +54,32 @@ interface CurrentStageHeroProps {
   ) => void;
   /** Handler for the "启动实验" CTA (draft variant). */
   onStart?: () => void;
-  /** Handler for "自动修复并继续" (failed variant). */
+  /** draft variant 且没有研究问题时:打开「研究详情 → 研究问题」编辑。 */
+  onEditQuestion?: () => void;
+  /** Handler for "自动修复并继续" (failed variant) and "继续实验" (paused). */
   onRetry?: () => void;
   /** Optional friendly error text from the failed banner. */
   failedReason?: string | null;
+  /** completed variant: 查看研究结论. */
+  onViewResult?: () => void;
+  /** completed variant: 开始下一轮实验. */
+  onNextRound?: () => void;
+  /** completed variant: 去写作页生成报告. */
+  onGenerateReport?: () => void;
 }
 
 // ---------------------------------------------------------------------------
 // Variant helpers
 // ---------------------------------------------------------------------------
 
-type Variant = "draft" | "running" | "waiting_user" | "completed" | "failed";
+type Variant = "draft" | "running" | "waiting_user" | "completed" | "failed" | "paused";
 
 function variantFor(overall: string | null | undefined, hasWaiting: boolean): Variant {
   if (overall === "completed") return "completed";
   if (overall === "failed") return "failed";
+  if (overall === "paused") return "paused";
   if (overall === "waiting_user" || hasWaiting) return "waiting_user";
-  if (overall === "running" || overall === "paused") return "running";
+  if (overall === "running") return "running";
   return "draft";
 }
 
@@ -85,8 +94,12 @@ export function CurrentStageHero({
   decidePending,
   onDecide,
   onStart,
+  onEditQuestion,
   onRetry,
   failedReason,
+  onViewResult,
+  onNextRound,
+  onGenerateReport,
 }: CurrentStageHeroProps) {
   const view = usePhaseView();
   const waitingStage = stageProgress.stages.find(
@@ -105,10 +118,11 @@ export function CurrentStageHero({
         variant === "failed" && "border-red-300 bg-red-50/40",
         variant === "completed" && "border-green-300 bg-green-50/30",
         variant === "waiting_user" && "border-amber-300 bg-amber-50/40",
+        variant === "paused" && "border-amber-200 bg-amber-50/20",
       )}
     >
       {variant === "draft" && (
-        <DraftVariant exp={exp} onStart={onStart} />
+        <DraftVariant exp={exp} onStart={onStart} onEditQuestion={onEditQuestion} />
       )}
 
       {variant === "running" && (
@@ -127,7 +141,15 @@ export function CurrentStageHero({
       )}
 
       {variant === "completed" && (
-        <CompletedVariant exp={exp} stageProgress={stageProgress} />
+        <CompletedVariant
+          onViewResult={onViewResult}
+          onNextRound={onNextRound}
+          onGenerateReport={onGenerateReport}
+        />
+      )}
+
+      {variant === "paused" && (
+        <PausedVariant onResume={onRetry} />
       )}
 
       {variant === "failed" && (
@@ -151,9 +173,11 @@ function noopDecide() {
 function DraftVariant({
   exp,
   onStart,
+  onEditQuestion,
 }: {
   exp: Experiment;
   onStart?: () => void;
+  onEditQuestion?: () => void;
 }) {
   const hasRq = !!(exp.research_question && exp.research_question.trim());
   return (
@@ -168,12 +192,19 @@ function DraftVariant({
       <p className="text-sm text-muted-foreground">
         {hasRq
           ? `研究问题:${exp.research_question}`
-          : "请先在下方补充你要研究的问题,或在左侧从已有研究方向中选择一个。"}
+          : "还没有研究问题。点击下方按钮填写研究问题,填写后即可启动实验。"}
       </p>
-      <Button onClick={onStart} disabled={!hasRq}>
-        <Sparkles className="mr-2 h-4 w-4" />
-        启动实验
-      </Button>
+      {hasRq ? (
+        <Button onClick={onStart}>
+          <Sparkles className="mr-2 h-4 w-4" />
+          启动实验
+        </Button>
+      ) : (
+        <Button onClick={onEditQuestion}>
+          <Sparkles className="mr-2 h-4 w-4" />
+          填写研究问题并启动
+        </Button>
+      )}
     </div>
   );
 }
@@ -239,11 +270,13 @@ function WaitingUserVariant({
 // ---------------------------------------------------------------------------
 
 function CompletedVariant({
-  exp,
-  stageProgress,
+  onViewResult,
+  onNextRound,
+  onGenerateReport,
 }: {
-  exp: Experiment;
-  stageProgress: StageProgress;
+  onViewResult?: () => void;
+  onNextRound?: () => void;
+  onGenerateReport?: () => void;
 }) {
   return (
     <div className="flex flex-col items-start gap-3">
@@ -258,15 +291,46 @@ function CompletedVariant({
         本轮实验的所有数据已经整理好,包括核心指标、SOTA 对比和后续研究方向。
       </p>
       <div className="flex flex-wrap gap-2 pt-2">
-        <Button variant="default">
+        <Button variant="default" onClick={onViewResult}>
           <Sparkles className="mr-2 h-4 w-4" />
           查看研究结论
         </Button>
-        <Button variant="outline">生成报告</Button>
-        <Button variant="ghost">开始下一轮实验</Button>
+        <Button variant="outline" onClick={onGenerateReport}>
+          生成报告
+        </Button>
+        <Button variant="ghost" onClick={onNextRound}>
+          开始下一轮实验
+        </Button>
       </div>
-      {/* Keep a reference so the bundler doesn't dead-code eliminate the prop */}
-      <span className="sr-only">{exp.id} {stageProgress.experiment_id}</span>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Variant: paused (user clicked 结束本次 / abort — the workflow is suspended,
+// NOT running. Previously this fell into the running variant and the user
+// stared at an eternally-spinning "AI 正在准备当前阶段".)
+// ---------------------------------------------------------------------------
+
+function PausedVariant({ onResume }: { onResume?: () => void }) {
+  return (
+    <div className="flex flex-col items-start gap-3">
+      <div className="flex items-center gap-2 text-amber-700">
+        <Hourglass className="h-5 w-5" />
+        <span className="text-sm font-medium">已暂停</span>
+      </div>
+      <h2 className="text-xl font-semibold leading-tight">
+        实验已暂停,进度都已保存。
+      </h2>
+      <p className="text-sm text-muted-foreground leading-relaxed">
+        已完成阶段的成果都保留着。你可以随时继续,系统会从中断的地方接着执行。
+      </p>
+      <div className="flex flex-wrap gap-2 pt-2">
+        <Button onClick={onResume}>
+          <Sparkles className="mr-2 h-4 w-4" />
+          继续实验
+        </Button>
+      </div>
     </div>
   );
 }

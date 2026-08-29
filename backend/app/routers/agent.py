@@ -1,31 +1,31 @@
 """Agent tasks router (design.md §15.4, §16).
 
-`POST /projects/{id}/agent/tasks` previously ran synchronously: the HTTP
-request held open until the LLM call returned, so a 30s generation made the
-UI feel frozen. It now returns immediately with `{task_id, job_id}` and
-dispatches the skill via `asyncio.create_task`. The AgentTask row is COMMITTED
-in `running` state before the task exits, so the global workflow sidebar
-(`/workflows/active`) immediately sees the in-flight task and the front-end
-mutations can flip to a "running" UI without waiting for the response.
+`POST /projects/{id}/agent/tasks` dispatches the skill in the background
+(`app.agent.dispatch`) and returns immediately with the in-flight task, so
+a 30s LLM generation never holds the HTTP request. Pass `?sync=1` to run
+synchronously (used by tests).
 
-The legacy "run synchronously" behavior is preserved as `?sync=1` (used by
-tests); production callers should always use the async path.
+GET /stream subscribes to the in-process EventBus for live delivery with a
+DB replay fallback (events published while no client was connected are
+replayed from `agent_task_events`).
 
-GET /events streams the task event log. POST /approve|/reject decides an
-approval gate.
+POST /approve decides an approval gate; the skill re-runs in the background.
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.agent import code_skills, research_skills, writing_skill  # noqa: F401  register skills
+from app.agent import dispatch
+from app.agent.events import get_event_bus
 from app.agent.service import (
     create_task,
     decide_approval,
@@ -34,7 +34,7 @@ from app.agent.service import (
 )
 from app.db.models import AgentTask, AgentTaskEvent, Approval, Experiment, ExperimentRun, Project
 from app.db.session import get_db, get_sessionmaker
-from app.jobs import finish_job_in_fresh_session, start_job
+from app.jobs import finish_job_in_fresh_session, start_job, update_job
 from app.llm.gateway import GatewayError, ModelNotConfigured
 from app.schemas import (
     ActiveWorkflowRunOut,
@@ -109,10 +109,9 @@ def list_active_workflows(db: Session = Depends(get_db)) -> ActiveWorkflowsOut:
     active_ids = {t.id for t in active}
     task_out: list[ActiveWorkflowTaskOut] = []
     for t in tasks:
-        exp_id: str | None = None
-        # Autonomous tasks store experiment_id in input_json (no FK column -
-        # create_all doesn't alter existing tables, so we parse it here).
-        if t.task_type == "experiment.autonomous_run" and t.input_json:
+        exp_id: str | None = t.experiment_id
+        # Legacy rows (pre-column) still carry it inside input_json.
+        if exp_id is None and t.task_type == "experiment.autonomous_run" and t.input_json:
             try:
                 inp = json.loads(t.input_json)
                 if isinstance(inp, dict):
@@ -128,8 +127,6 @@ def list_active_workflows(db: Session = Depends(get_db)) -> ActiveWorkflowsOut:
                 experiment_id=exp_id,
                 last_message=last_msg.get(t.id),
                 recent=t.id not in active_ids,
-                # M34: ZSciBaseModel's serializer auto-appends 'Z' to naive
-                # datetimes on JSON output.
                 created_at=t.created_at,
                 updated_at=t.updated_at,
             )
@@ -185,22 +182,19 @@ def list_active_workflows(db: Session = Depends(get_db)) -> ActiveWorkflowsOut:
 
 
 @router.post("/api/v1/projects/{project_id}/agent/tasks", response_model=AgentTaskOut)
-def create_and_run_task(
+async def create_and_run_task(
     project_id: str,
     payload: AgentTaskCreate,
+    sync: bool = Query(False, description="Run synchronously (tests); default dispatches in background"),
     db: Session = Depends(get_db),
 ) -> AgentTaskOut:
-    """Create + run an agent task synchronously, returning the full
-    `AgentTask` when the skill finishes.
+    """Create an agent task and start it.
 
-    The response shape is unchanged from the Phase 2 design (full task
-    payload on success) so existing tests and frontend callers keep working
-    as-is. To make the in-flight task visible in the global workflow
-    sidebar (so navigating away from the triggering page doesn't lose it),
-    we also create a tracking `Job` row at the start and mark it terminal
-    when the skill completes. The front-end uses `isPending` for the
-    "running" button label and the sidebar's `/workflows/active` poll for
-    cross-page visibility.
+    Default: dispatch the skill in the background and return the in-flight
+    task immediately (status pending/running). The caller tracks progress
+    via GET /agent/tasks/{id} or the SSE stream. `?sync=1` runs the skill
+    to completion inside the request (used by tests and internal callers
+    that need the final result).
     """
     if db.get(Project, project_id) is None:
         raise HTTPException(404, "Project not found")
@@ -210,12 +204,12 @@ def create_and_run_task(
         db, project_id=project_id, task_type=payload.task_type, input_data=payload.input
     )
     # Sidebar tracking Job. Committed immediately so /workflows/active shows
-    # the task as in-flight even while the (still-running) skill holds the
-    # SQLite write lock during the LLM call. target_id points back to the
-    # task for deep-link routing.
+    # the task as in-flight. target_id points back to the task for
+    # deep-link routing.
     _TASK_TITLES = {
         "research.trend_analysis": "研究趋势分析",
         "research.generate_hypothesis": "生成研究想法",
+        "research.generate_hypothesis_candidates": "生成候选研究想法",
         "code.search_github": "GitHub 代码检索",
         "writing.draft_section": "写作起草",
         "experiment.autonomous_run": "自主实验",
@@ -233,30 +227,27 @@ def create_and_run_task(
     job_id = job.id
     db.commit()
 
-    # Run the skill synchronously in the request. run_task commits mid-skill
-    # so the LLM window doesn't hold the SQLite write lock; the exception
-    # path below mirrors the gateway/config error mapping (503 / 502).
-    try:
-        task = _run_task_in_fresh_session(task_id, job_id)
-    except ModelNotConfigured as exc:
-        # run_task already persisted the failed status; commit it so the task
-        # row survives the rollback the `with` block would trigger, then
-        # return 503 so the frontend can show "configure your model".
-        finish_job_in_fresh_session(job_id, status="failed", error=str(exc))
-        raise HTTPException(503, str(exc)) from exc
-    except GatewayError as exc:
-        finish_job_in_fresh_session(job_id, status="failed", error=str(exc))
-        raise HTTPException(502, str(exc)) from exc
-    except ValueError as exc:
-        finish_job_in_fresh_session(job_id, status="failed", error=str(exc))
-        raise HTTPException(400, str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("agent task %s failed unexpectedly", payload.task_type)
-        finish_job_in_fresh_session(job_id, status="failed", error=str(exc))
-        raise HTTPException(500, f"Agent task failed: {exc}") from exc
-    # M34: ZSciBaseModel's serializer auto-appends 'Z' to naive datetimes
-    # in the JSON output (see schemas.py). No manual `iso_utc` wrapping
-    # required here.
+    if sync:
+        try:
+            task = await asyncio.to_thread(_run_task_in_fresh_session, task_id, job_id)
+            return AgentTaskOut.model_validate(task)
+        except ModelNotConfigured as exc:
+            raise HTTPException(503, str(exc)) from exc
+        except GatewayError as exc:
+            raise HTTPException(502, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("agent task %s failed unexpectedly", payload.task_type)
+            raise HTTPException(500, f"Agent task failed: {exc}") from exc
+
+    # Background: return the in-flight task; the dispatcher finishes it.
+    dispatch.dispatch(
+        task_id,
+        _dispatch_agent_task(task_id, job_id),
+        name=f"zsci-agent-{task_id}",
+    )
+    db.refresh(task)
     return AgentTaskOut.model_validate(task)
 
 
@@ -322,18 +313,11 @@ def _run_task_in_fresh_session(task_id: str, job_id: str) -> AgentTask:
         raise
 
 
-async def _agent_task_dispatcher(task_id: str, job_id: str) -> None:
-    """Background entrypoint (kept for future async use; not currently
-    invoked). The /agent/tasks endpoint runs synchronously today so the
-    front-end can chain onSuccess callbacks to refresh the affected lists
-    (ideas / repos / files) immediately without polling. If we ever want
-    to release the HTTP request before the LLM answers, dispatch through
-    this function from the route via `asyncio.create_task`."""
+async def _dispatch_agent_task(task_id: str, job_id: str) -> None:
+    """Background entrypoint: run the skill off the event loop, map errors."""
     try:
         await asyncio.to_thread(_run_task_in_fresh_session, task_id, job_id)
-    except ModelNotConfigured as exc:
-        finish_job_in_fresh_session(job_id, status="failed", error=str(exc))
-    except GatewayError as exc:
+    except (ModelNotConfigured, GatewayError) as exc:
         finish_job_in_fresh_session(job_id, status="failed", error=str(exc))
     except Exception as exc:  # noqa: BLE001
         logger.exception("agent task %s crashed in background", task_id)
@@ -345,7 +329,6 @@ def get_task(task_id: str, db: Session = Depends(get_db)) -> AgentTaskOut:
     task = db.get(AgentTask, task_id)
     if task is None:
         raise HTTPException(404, "Task not found")
-    # M34: ZSciBaseModel auto-appends 'Z' to naive datetimes on JSON output.
     return AgentTaskOut.model_validate(task)
 
 
@@ -354,55 +337,85 @@ def list_events(task_id: str, db: Session = Depends(get_db)) -> list[AgentEventO
     task = db.get(AgentTask, task_id)
     if task is None:
         raise HTTPException(404, "Task not found")
-    # M34: ZSciBaseModel auto-appends 'Z' to naive datetimes on JSON output.
     return [AgentEventOut.model_validate(e) for e in task.events]
 
 
 @router.get("/api/v1/agent/tasks/{task_id}/stream")
 async def stream_events(task_id: str, request: Request, db: Session = Depends(get_db)) -> StreamingResponse:
-    """SSE stream of task events (Phase 2: poll-based replay of stored events).
+    """SSE stream of task events.
 
-    Async + disconnect-aware (H3): previously used a sync generator with
-    `time.sleep(1)` which tied up a threadpool worker + DB session indefinitely.
+    Two layers: the in-process EventBus delivers events the moment they are
+    emitted; a slow DB poll (2s) is the fallback that replays events the
+    bus missed (emitted before this client connected, or dropped due to a
+    slow consumer). Closes with a `{kind:"done"}` event when the task
+    reaches a terminal state (or pauses at awaiting_approval).
     """
     task = db.get(AgentTask, task_id)
     if task is None:
         raise HTTPException(404, "Task not found")
 
+    bus = get_event_bus()
+
+    def _sse(payload: dict) -> str:
+        return "data: " + json.dumps(payload, ensure_ascii=False, default=str) + "\n\n"
+
+    async def _replay_from_db(seen_ids: set[str]) -> tuple[list[str], str | None]:
+        """Fetch all events not yet delivered + the current task status."""
+        rows = db.scalars(
+            select(AgentTaskEvent)
+            .where(AgentTaskEvent.task_id == task_id)
+            .order_by(AgentTaskEvent.created_at, AgentTaskEvent.id)
+        ).all()
+        out = [
+            _sse({
+                "id": e.id,
+                "kind": e.kind,
+                "message": e.message,
+                "created_at": iso_utc(e.created_at),
+            })
+            for e in rows
+            if e.id not in seen_ids
+        ]
+        seen_ids.update(e.id for e in rows)
+        db.expire_all()
+        fresh = db.get(AgentTask, task_id)
+        status = fresh.status if fresh is not None else "stopped"
+        return out, status
+
     async def gen():
-        seen = 0
-        while True:
-            if await request.is_disconnected():
-                return
-            db.expire_all()
-            fresh = db.get(AgentTask, task_id)
-            if fresh is None:
-                return
-            events = list(fresh.events)
-            while seen < len(events):
-                e = events[seen]
-                seen += 1
-                yield (
-                    "data: "
-                    + json.dumps(
-                        {
-                            "id": e.id,
-                            "kind": e.kind,
-                            "message": e.message,
-                            "created_at": iso_utc(e.created_at),
-                        },
-                        ensure_ascii=False,
+        seen_ids: set[str] = set()
+        delivered, status = await _replay_from_db(seen_ids)
+        for item in delivered:
+            yield item
+        if status in ("completed", "failed", "rejected", "stopped"):
+            yield _sse({"kind": "done", "status": status})
+            return
+        if status == "awaiting_approval":
+            yield _sse({"kind": "done", "status": status})
+            return
+
+        async with bus.subscribe(task_id) as sub:
+            while True:
+                if await request.is_disconnected():
+                    return
+                event = await sub.next_event(timeout=2.0)
+                if event is not None and event.get("id"):
+                    if event["id"] in seen_ids:
+                        continue
+                    seen_ids.add(event["id"])
+                    event.setdefault(
+                        "created_at", datetime.now(UTC).isoformat(timespec="seconds")
                     )
-                    + "\n\n"
-                )
-            if fresh.status in ("completed", "failed", "rejected", "awaiting_approval"):
-                yield (
-                    "data: "
-                    + json.dumps({"kind": "done", "status": fresh.status})
-                    + "\n\n"
-                )
-                return
-            await asyncio.sleep(1)
+                    yield _sse(event)
+                    if event.get("kind") == "done":
+                        return
+                # Timeout / gap / done-less event: reconcile against the DB.
+                delivered, status = await _replay_from_db(seen_ids)
+                for item in delivered:
+                    yield item
+                if status in ("completed", "failed", "rejected", "stopped", "awaiting_approval"):
+                    yield _sse({"kind": "done", "status": status})
+                    return
 
     return StreamingResponse(gen(), media_type="text/event-stream")
 
@@ -414,7 +427,13 @@ def list_approvals(task_id: str, db: Session = Depends(get_db)) -> list[Approval
 
 
 @router.post("/api/v1/agent/tasks/{task_id}/approve", response_model=ApprovalOut)
-def approve_task(task_id: str, payload: ApprovalDecision, db: Session = Depends(get_db)) -> ApprovalOut:
+async def approve_task(task_id: str, payload: ApprovalDecision, db: Session = Depends(get_db)) -> ApprovalOut:
+    """Decide an approval gate.
+
+    Approve → inject the decision into the task input and re-run the skill
+    in the BACKGROUND (the request returns immediately; track progress via
+    the task detail / SSE stream). Reject → task rejected, terminal.
+    """
     task = db.get(AgentTask, task_id)
     if task is None:
         raise HTTPException(404, "Task not found")
@@ -446,45 +465,18 @@ def approve_task(task_id: str, payload: ApprovalDecision, db: Session = Depends(
         task.input_json = json.dumps(inp, ensure_ascii=False)
         task.status = "running"
         if job_id is not None:
-            from app.jobs import update_job
             update_job(db, job_id, message="审批通过,继续执行")
-        db.flush()
-        try:
-            task = run_task(db, task)
-        except ModelNotConfigured as exc:
-            # run_task already persisted "failed" (flush, not commit); commit it
-            # so the status survives. Without this handler (which create_and_run_task
-            # has), the exception propagated, get_db rolled back the "failed" flush,
-            # and the task stayed stuck in "running" - unrecoverable, no pending
-            # approval to re-approve.
-            db.commit()
-            raise HTTPException(503, str(exc)) from exc
-        except GatewayError as exc:
-            db.commit()
-            raise HTTPException(502, str(exc)) from exc
-        except ValueError as exc:
-            db.rollback()
-            raise HTTPException(400, str(exc)) from exc
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("agent task %s (re-run after approval) failed unexpectedly", task.task_type)
-            try:
-                db.commit()
-            except Exception:  # noqa: BLE001
-                db.rollback()
-            raise HTTPException(500, f"Agent task failed: {exc}") from exc
-        # Mirror post-approval run result back to the Job so the sidebar
-        # reflects the final state immediately (instead of after the
-        # dispatcher's stale-session update).
-        if job_id is not None:
-            from app.jobs import finish_job_in_fresh_session
-            if task.status == "completed":
-                finish_job_in_fresh_session(job_id, status="completed", result_summary="完成")
-            elif task.status in ("failed", "rejected", "stopped"):
-                finish_job_in_fresh_session(job_id, status="failed", error=task.error)
     else:
         task.status = "rejected"
         if job_id is not None:
             finish_job_in_fresh_session(job_id, status="failed", error="用户拒绝")
     db.commit()
     db.refresh(approval)
+
+    if payload.approved and job_id is not None:
+        dispatch.dispatch(
+            task_id,
+            _dispatch_agent_task(task_id, job_id),
+            name=f"zsci-agent-{task_id}",
+        )
     return ApprovalOut.model_validate(approval)

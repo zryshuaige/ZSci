@@ -8,7 +8,7 @@
 //   - 顶部"综合评估优先"角标(仅 recommended=true 时,措辞从 "AI 推荐" 改)
 
 import { useState } from "react";
-import { ChevronDown, ChevronUp, Star, Award, Check } from "lucide-react";
+import { ChevronDown, ChevronUp, Star, Award, Check } from "@/components/ui/icons";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { cn } from "@/lib/cn";
@@ -108,7 +108,7 @@ export function MultiIdeaCard({
         <div className="mt-3">
           <button
             type="button"
-            className="flex items-center gap-1 text-xs text-blue-600 hover:underline"
+            className="flex items-center gap-1 text-xs text-primary hover:underline"
             onClick={() => setOpen((v) => !v)}
             aria-expanded={open}
           >

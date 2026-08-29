@@ -11,6 +11,8 @@
  * that don't go through that endpoint.
  */
 
+import { stageKeyZh } from "@/lib/eventHumanize";
+
 /** Internal skill ids used in agent task titles — translated to natural
  *  Chinese so the UI never shows raw enum strings. */
 export const AGENT_TASK_LABELS: Record<string, string> = {
@@ -148,6 +150,11 @@ export function eventKindLabel(kind: string | null | undefined): string {
 
 export function actionTypeLabel(action: string | null | undefined): string {
   if (!action) return "操作";
+  // 实验阶段审批的动作形如 experiment.stage.phase_0_scope —— 译成
+  // 「实验阶段确认:需求与基准」,而不是把内部动作串直接糊给用户。
+  if (action.startsWith("experiment.stage.")) {
+    return `实验阶段确认:${stageKeyZh(action.slice("experiment.stage.".length))}`;
+  }
   return ACTION_TYPE_LABELS[action] || action;
 }
 

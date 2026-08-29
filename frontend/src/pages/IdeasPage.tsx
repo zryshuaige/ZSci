@@ -1,34 +1,26 @@
-import { useState, useRef, useEffect } from "react";
-import { createPortal } from "react-dom";
+import { useState } from "react";
 import { useOutletContext } from "react-router-dom";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
-import { Lightbulb, Trash2, Sparkles, Plus, Pencil, ChevronDown, Loader2 } from "lucide-react";
-import { api, type Idea, type Project } from "@/lib/api";
-import { showFriendlyError } from "@/lib/useFriendlyError";
+import { Lightbulb, Trash2, Sparkles, Plus, Pencil, ChevronDown, FlaskConical, AlertTriangle, RotateCw } from "@/components/ui/icons";
+import { api, qk, type Idea, type Project } from "@/api";
+import { statusMeta } from "@/lib/statusMeta";
+import { useToastMutation } from "@/lib/hooks/useToastMutation";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
+import { PageHeader } from "@/components/ui/PageHeader";
+import { StatusBadge } from "@/components/ui/StatusBadge";
 import { Input, Textarea } from "@/components/ui/Input";
 import { ConfirmDialog } from "@/components/ui/Dialog";
+import { Modal } from "@/components/ui/Modal";
+import { Dropdown, DropdownItem } from "@/components/ui/Dropdown";
 import { ListSkeleton } from "@/components/ui/Skeleton";
+import { EmptyState } from "@/components/ui/EmptyState";
 import { cn } from "@/lib/cn";
-import { useAgentTaskStatus } from "@/lib/hooks/useAgentTaskStatus";
 
-// DB stores english status values; map to natural Chinese for display so the
-// UI doesn't mix raw english tokens ("hypothesis"/"backlog") into Chinese text.
-const STATUS_LABEL: Record<string, string> = {
-  backlog: "待评估",
-  hypothesis: "待验证",
-  decision: "已纳入研究方向",
-  rejected: "已搁置",
-};
-const STATUS_COLORS: Record<string, string> = {
-  backlog: "bg-muted",
-  hypothesis: "bg-blue-100 text-blue-800",
-  decision: "bg-green-100 text-green-800",
-  rejected: "bg-red-100 text-red-800",
-};
-const STATUS_ORDER: (keyof typeof STATUS_LABEL)[] = ["backlog", "hypothesis", "decision", "rejected"];
+// 状态切换的可选集合(展示词与颜色统一走 statusMeta,全站唯一词表;
+// 这里只保留「想法可以有哪些状态」这一业务顺序)。
+const STATUS_ORDER = ["candidate", "backlog", "hypothesis", "decision", "rejected"] as const;
 
 export default function IdeasPage() {
   const { project } = useOutletContext<{ project: Project }>();
@@ -42,37 +34,41 @@ export default function IdeasPage() {
   const [deletingIdea, setDeletingIdea] = useState<{ id: string; title: string | null } | null>(null);
   // Editing state: a copy of the idea being edited, surfaced in a dialog.
   const [editing, setEditing] = useState<{ id: string; title: string; hypothesis: string; motivation: string } | null>(null);
-  const [statusMenuFor, setStatusMenuFor] = useState<string | null>(null);
 
-  const { data: ideas = [], isLoading: ideasLoading } = useQuery({
-    queryKey: ["ideas", project.id],
+  const ideasQuery = useQuery({
+    queryKey: qk.ideas.byProject(project.id),
     queryFn: () => api.listIdeas(project.id),
   });
+  const ideas = ideasQuery.data ?? [];
 
-  const createMutation = useMutation({
+  // 所有 mutation 统一走 useToastMutation:失败必有 toast(禁止静默失败),
+  // 有用户感知意义的操作附成功反馈。
+  const createMutation = useToastMutation({
     mutationFn: () =>
       api.createIdea(project.id, { title, hypothesis: hyp, motivation: motiv, status: "backlog" }),
-    onError: (err) => showFriendlyError(err),
+    successMessage: "已添加研究想法",
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["ideas", project.id] });
+      qc.invalidateQueries({ queryKey: qk.ideas.byProject(project.id) });
       setCreating(false); setTitle(""); setHyp(""); setMotiv("");
     },
   });
 
-  const delMutation = useMutation({
+  const delMutation = useToastMutation({
     mutationFn: (id: string) => api.deleteIdea(id),
-    onError: (err) => showFriendlyError(err),
+    successMessage: "已删除",
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["ideas", project.id] });
+      qc.invalidateQueries({ queryKey: qk.ideas.byProject(project.id) });
       setDeletingIdea(null);
     },
   });
 
-  const updateMutation = useMutation({
+  const updateMutation = useToastMutation({
     mutationFn: (args: { id: string; body: Partial<{ title: string; hypothesis: string; motivation: string; status: string }> }) =>
       api.updateIdea(args.id, args.body),
-    onError: (err) => showFriendlyError(err),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["ideas", project.id] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.ideas.byProject(project.id) });
+      setEditing(null);
+    },
   });
 
   // Phase B entrypoint: 「基于已有研究生成候选」不再直接入库,而是跳到候选对比
@@ -81,145 +77,147 @@ export default function IdeasPage() {
   const goGenerate = () => {
     const seed = (project.research_direction || "").trim();
     if (!seed) {
-      navigate(`/explore/${project.id}/new`);
+      navigate(`/projects/${project.id}/explore/new`);
       return;
     }
     const params = new URLSearchParams({ idea: seed });
-    navigate(`/explore/${project.id}/ideas?${params.toString()}`);
+    navigate(`/projects/${project.id}/explore/ideas?${params.toString()}`);
   };
-  const genMutation = useMutation({
-    mutationFn: () =>
-      api.runAgentTask(project.id, "research.generate_hypothesis", { user_request: project.research_direction || "" }),
-    onError: (err) => showFriendlyError(err),
-    onSuccess: (task) => {
-      // The backend synchronously ran the skill and returned the terminal
-      // task. Refresh the affected lists and the global sidebar so the
-      // freshly-created Idea rows show up immediately. The sidebar's
-      // `recent` window also picks up the completed Job row.
-      qc.invalidateQueries({ queryKey: ["ideas", project.id] });
-      qc.invalidateQueries({ queryKey: ["workflows", "active"] });
-      if (task?.id) setActiveGenTaskId(task.id);
+
+  // 想法 → 实验：以该想法的假设为研究问题建实验（related_idea_id 回链），
+  // 成功后直达计划确认页 —— 旅程「想法 → 实验」的主 CTA。
+  const startExperimentMutation = useToastMutation({
+    mutationFn: (idea: Idea) =>
+      api.createExperiment(project.id, {
+        title: idea.title || "未命名实验",
+        research_question: (idea.hypothesis || idea.motivation || idea.title || "").trim(),
+        hypothesis: (idea.motivation || "").trim() || undefined,
+        related_idea_id: idea.id,
+      }),
+    successMessage: "已创建实验，进入计划确认",
+    onSuccess: (exp) => {
+      qc.invalidateQueries({ queryKey: qk.experiments.byProject(project.id) });
+      navigate(`/projects/${project.id}/experiments/${exp.id}/preview`);
     },
   });
 
-  // Track the most recent task so we can show a transient "running" hint
-  // while the mutation is in-flight (the request itself is the long part —
-  // the LLM call holds the HTTP connection until the skill finishes).
-  const [activeGenTaskId, setActiveGenTaskId] = useState<string | null>(null);
-  const genTaskStatus = useAgentTaskStatus(
-    activeGenTaskId,
-    () => {
-      // When the task leaves the active/recent window, clear the local id.
-      setActiveGenTaskId(null);
-    },
-  );
-  // Button is "busy" while the request is in flight OR the task is still
-  // visible in the sidebar's active/recent window. Combining both gives a
-  // continuous running state without the "submitting → idle → waiting"
-  // flicker.
-  const isGenRunning = genMutation.isPending || genTaskStatus.isActive || genTaskStatus.isTerminal;
+  const canCreate = !!title.trim();
+  const canSaveEdit = !!editing?.title.trim();
 
   return (
     <div className="p-8 max-w-5xl mx-auto space-y-5">
-      <div className="relative z-chrome flex items-center justify-between gap-4">
-        <div className="min-w-0">
-          <h1 className="text-xl font-semibold tracking-tight">研究方向汇总</h1>
-          <p className="text-xs text-muted-foreground mt-1">
-            这里汇总本项目已记录的研究方向,可手动整理,或基于已下载文献挑选进一步评估的候选。
-          </p>
-        </div>
-        <div className="flex gap-2 shrink-0">
-          <Button variant="outline" onClick={() => setCreating(true)}>
-            <Plus className="h-4 w-4" /> 手动记录
-          </Button>
-          <Button
-            onClick={goGenerate}
-            disabled={isGenRunning}
-            title="基于项目已下载文献,挑选若干值得进一步评估的研究方向"
-          >
-            {isGenRunning ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <Sparkles className="h-4 w-4" />
-            )}
-            {isGenRunning ? "整理中…" : "基于已有研究生成候选"}
-          </Button>
-        </div>
+      <div className="relative z-chrome">
+        <PageHeader
+          title="研究想法"
+          subtitle="这里汇总本项目已记录的研究想法,可手动整理,或基于已下载文献挑选进一步评估的候选。"
+          actions={
+            <div className="flex gap-2 shrink-0">
+              <Button variant="outline" onClick={() => setCreating(true)}>
+                <Plus className="h-4 w-4" /> 手动记录
+              </Button>
+              <Button onClick={goGenerate} title="基于项目已下载文献,挑选若干值得进一步评估的研究想法">
+                <Sparkles className="h-4 w-4" />
+                基于已有研究整理候选
+              </Button>
+            </div>
+          }
+        />
       </div>
 
-      {genTaskStatus.isTerminal && genTaskStatus.status === "failed" && (
-        <Card className="p-3 text-sm text-destructive animate-pop">
-          整理任务失败{genTaskStatus.lastMessage ? `:${genTaskStatus.lastMessage}` : ""}
-          <div className="text-xs mt-1 opacity-80">可在左侧「进行中的任务」查看详情。</div>
-        </Card>
-      )}
-
-      {ideasLoading ? (
+      {/* 三态分离:骨架 / 错误卡(可重试)/ 空态(带探索流程出口)/ 列表。 */}
+      {ideasQuery.isLoading ? (
         <ListSkeleton rows={3} />
-      ) : ideas.length === 0 ? (
-        <Card className="p-10 text-center text-muted-foreground animate-pop">
-          <Lightbulb className="h-10 w-10 mx-auto mb-3 opacity-40" />
-          <div className="text-sm">还没有研究想法</div>
-          <div className="text-xs mt-1.5">可手动添加，或点击「智能生成想法」，基于已下载论文生成可验证假设</div>
+      ) : ideasQuery.isError ? (
+        <Card className="p-6 text-center">
+          <AlertTriangle className="mx-auto h-6 w-6 text-destructive/70" />
+          <div className="mt-2 text-sm text-muted-foreground">研究想法列表加载失败</div>
+          <Button
+            size="sm"
+            variant="outline"
+            className="mt-3"
+            onClick={() => ideasQuery.refetch()}
+          >
+            <RotateCw className="h-3.5 w-3.5" /> 重试
+          </Button>
         </Card>
+      ) : ideas.length === 0 ? (
+        <EmptyState
+          icon={<Lightbulb className="h-10 w-10" />}
+          title="还没有研究想法"
+          subtitle="前往探索流程,系统会结合项目文献整理若干候选方向供你挑选;也可以手动记录一条。"
+          action={
+            <Button onClick={goGenerate}>
+              <Sparkles className="h-4 w-4" /> 去探索候选方向
+            </Button>
+          }
+        />
       ) : (
         <div className="relative z-0 grid gap-3">
           {ideas.map((idea, i) => (
             <Card
               key={idea.id}
               style={{ animationDelay: `${i * 40}ms` }}
-              className="p-5 animate-slide-up hover-lift"
+              className="p-5 animate-slide-up hover-lift hover:border-primary/25 transition-colors duration-sm"
             >
               <div className="flex items-start justify-between gap-3">
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 flex-wrap">
-                    <span className="font-medium">{idea.title || "（未命名）"}</span>
-                    <StatusMenu
+                    <span className="font-medium">{idea.title || "(未命名)"}</span>
+                    <StatusDropdown
                       current={idea.status}
-                      open={statusMenuFor === idea.id}
-                      onOpenChange={(open) => setStatusMenuFor(open ? idea.id : null)}
-                      onSelect={(s) => {
-                        setStatusMenuFor(null);
-                        updateMutation.mutate({ id: idea.id, body: { status: s } });
-                      }}
+                      busy={updateMutation.isPending}
+                      onSelect={(s) => updateMutation.mutate({ id: idea.id, body: { status: s } })}
                     />
                   </div>
                   {idea.hypothesis && (
                     <div className="text-sm mt-2 leading-relaxed">
-                      <span className="text-muted-foreground">假设：</span>
+                      <span className="text-muted-foreground">假设:</span>
                       <span className="text-foreground">{idea.hypothesis}</span>
                     </div>
                   )}
                   {idea.motivation && (
                     <div className="text-xs text-muted-foreground mt-1.5 leading-relaxed">
-                      动机：{idea.motivation}
+                      动机:{idea.motivation}
                     </div>
                   )}
                   <IdeaDetails idea={idea} />
                 </div>
-                <div className="flex items-center gap-0.5 shrink-0">
+                <div className="flex flex-col items-end gap-2 shrink-0">
+                  <div className="flex items-center gap-0.5">
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={() =>
+                        setEditing({
+                          id: idea.id,
+                          title: idea.title ?? "",
+                          hypothesis: idea.hypothesis ?? "",
+                          motivation: idea.motivation ?? "",
+                        })
+                      }
+                      title="编辑想法"
+                      aria-label="编辑想法"
+                    >
+                      <Pencil className="h-4 w-4" />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => setDeletingIdea({ id: idea.id, title: idea.title })}
+                      title="删除想法"
+                      aria-label="删除想法"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  </div>
                   <Button
-                    variant="ghost"
-                    size="icon"
-                    onClick={() =>
-                      setEditing({
-                        id: idea.id,
-                        title: idea.title ?? "",
-                        hypothesis: idea.hypothesis ?? "",
-                        motivation: idea.motivation ?? "",
-                      })
-                    }
-                    title="编辑想法"
+                    size="sm"
+                    variant={ideaRecommended(idea) ? "default" : "outline"}
+                    onClick={() => startExperimentMutation.mutate(idea)}
+                    loading={startExperimentMutation.isPending && startExperimentMutation.variables?.id === idea.id}
+                    title="以这个想法创建实验，进入计划确认"
                   >
-                    <Pencil className="h-4 w-4" />
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    onClick={() => setDeletingIdea({ id: idea.id, title: idea.title })}
-                    title="删除想法"
-                  >
-                    <Trash2 className="h-4 w-4" />
+                    <FlaskConical className="h-3.5 w-3.5" /> 用这个想法做实验
                   </Button>
                 </div>
               </div>
@@ -228,68 +226,97 @@ export default function IdeasPage() {
         </div>
       )}
 
-      <ConfirmDialog
+      {/* 表单统一用 Modal(Enter 提交 / Esc 关闭 / 自动聚焦);标题为空时
+          确认按钮禁用并给出内联提示,而不是点了没反应。 */}
+      <Modal
         open={creating}
+        onClose={() => setCreating(false)}
         title="添加研究想法"
         busy={createMutation.isPending}
-        description={
-          <div className="space-y-2">
-            <Input placeholder="标题" value={title} onChange={(e) => setTitle(e.target.value)} />
-            <Textarea
-              placeholder="核心假设（待验证的想法）"
-              rows={2}
-              value={hyp}
-              onChange={(e) => setHyp(e.target.value)}
-            />
-            <Textarea placeholder="动机" rows={2} value={motiv} onChange={(e) => setMotiv(e.target.value)} />
-          </div>
+        onSubmit={() => {
+          if (canCreate) createMutation.mutate();
+        }}
+        footer={
+          <>
+            <Button type="button" variant="outline" onClick={() => setCreating(false)} disabled={createMutation.isPending}>
+              取消
+            </Button>
+            <Button type="submit" loading={createMutation.isPending} disabled={!canCreate}>
+              添加
+            </Button>
+          </>
         }
-        confirmLabel="添加"
-        onCancel={() => setCreating(false)}
-        onConfirm={() => title.trim() && createMutation.mutate()}
-      />
+      >
+        <div className="space-y-3">
+          <Input placeholder="标题" value={title} onChange={(e) => setTitle(e.target.value)} />
+          {!canCreate && (
+            <div className="text-xs text-muted-foreground">需要一个标题才能添加。</div>
+          )}
+          <Textarea
+            placeholder="核心假设(待验证的想法)"
+            rows={2}
+            value={hyp}
+            onChange={(e) => setHyp(e.target.value)}
+          />
+          <Textarea placeholder="动机" rows={2} value={motiv} onChange={(e) => setMotiv(e.target.value)} />
+        </div>
+      </Modal>
 
-      {/* Edit dialog — reuses ConfirmDialog with controlled inputs bound to the
-          editing state. Persists via PATCH on confirm. */}
-      <ConfirmDialog
+      {/* Edit dialog — controlled inputs bound to the editing state; persists
+          via PATCH on submit. */}
+      <Modal
         open={!!editing}
+        onClose={() => setEditing(null)}
         title="编辑研究想法"
         busy={updateMutation.isPending}
-        description={
-          <div className="space-y-2">
-            <Input
-              placeholder="标题"
-              value={editing?.title ?? ""}
-              onChange={(e) => setEditing((s) => (s ? { ...s, title: e.target.value } : s))}
-            />
-            <Textarea
-              placeholder="核心假设（待验证的想法）"
-              rows={3}
-              value={editing?.hypothesis ?? ""}
-              onChange={(e) => setEditing((s) => (s ? { ...s, hypothesis: e.target.value } : s))}
-            />
-            <Textarea
-              placeholder="动机"
-              rows={2}
-              value={editing?.motivation ?? ""}
-              onChange={(e) => setEditing((s) => (s ? { ...s, motivation: e.target.value } : s))}
-            />
-          </div>
+        onSubmit={() => {
+          if (editing && canSaveEdit) {
+            updateMutation.mutate({
+              id: editing.id,
+              body: { title: editing.title, hypothesis: editing.hypothesis, motivation: editing.motivation },
+            });
+          }
+        }}
+        footer={
+          <>
+            <Button type="button" variant="outline" onClick={() => setEditing(null)} disabled={updateMutation.isPending}>
+              取消
+            </Button>
+            <Button type="submit" loading={updateMutation.isPending} disabled={!canSaveEdit}>
+              保存
+            </Button>
+          </>
         }
-        confirmLabel="保存"
-        onCancel={() => setEditing(null)}
-        onConfirm={() =>
-          editing &&
-          updateMutation.mutate(
-            { id: editing.id, body: { title: editing.title, hypothesis: editing.hypothesis, motivation: editing.motivation } },
-          )
-        }
-      />
+      >
+        <div className="space-y-3">
+          <Input
+            placeholder="标题"
+            value={editing?.title ?? ""}
+            onChange={(e) => setEditing((s) => (s ? { ...s, title: e.target.value } : s))}
+          />
+          {!canSaveEdit && (
+            <div className="text-xs text-muted-foreground">标题不能为空。</div>
+          )}
+          <Textarea
+            placeholder="核心假设(待验证的想法)"
+            rows={3}
+            value={editing?.hypothesis ?? ""}
+            onChange={(e) => setEditing((s) => (s ? { ...s, hypothesis: e.target.value } : s))}
+          />
+          <Textarea
+            placeholder="动机"
+            rows={2}
+            value={editing?.motivation ?? ""}
+            onChange={(e) => setEditing((s) => (s ? { ...s, motivation: e.target.value } : s))}
+          />
+        </div>
+      </Modal>
 
       {/* H6: confirm idea deletion. */}
       <ConfirmDialog
         open={!!deletingIdea}
         title="删除研究想法"
+        danger
         description={
           <div className="text-sm space-y-1">
             <p>将删除「{deletingIdea?.title || "(未命名)"}」。</p>
@@ -302,6 +329,56 @@ export default function IdeasPage() {
         onConfirm={() => deletingIdea && delMutation.mutate(deletingIdea.id)}
       />
     </div>
+  );
+}
+
+/** 状态切换器 —— 用统一的 Dropdown 原语(portal 渲染,自动处理外部点击 /
+ *  Esc 关闭 / 定位),词与颜色来自 statusMeta 单一词表。
+ *
+ *  为什么必须是 portal:想法卡片带 hover transform,会创建新的 CSS 层叠
+ *  上下文,普通 absolute 菜单会被相邻卡片盖住;Dropdown 内部已处理这一点。 */
+function StatusDropdown({
+  current,
+  busy,
+  onSelect,
+}: {
+  current: string;
+  busy: boolean;
+  onSelect: (status: string) => void;
+}) {
+  return (
+    <Dropdown
+      trigger={
+        <span
+          className={cn(
+            "inline-flex items-center gap-0.5 cursor-pointer transition-opacity duration-sm ease-out hover:opacity-85",
+            busy && "opacity-60 pointer-events-none",
+          )}
+        >
+          <StatusBadge status={current} />
+          <ChevronDown className="h-3 w-3 text-muted-foreground" />
+        </span>
+      }
+    >
+      {(close) => (
+        <>
+          {STATUS_ORDER.map((s) => {
+            const sm = statusMeta(s);
+            return (
+              <DropdownItem
+                key={s}
+                onClick={() => {
+                  close();
+                  if (s !== current) onSelect(s);
+                }}
+              >
+                <span className={cn(current === s && "font-medium")}>{sm.label}</span>
+              </DropdownItem>
+            );
+          })}
+        </>
+      )}
+    </Dropdown>
   );
 }
 
@@ -339,9 +416,15 @@ function formatFieldValue(v: unknown): string {
         return String(item);
       })
       .filter(Boolean)
+      .join(";");
+  }
+  if (typeof v === "object") {
+    // 嵌套对象 → "键: 值" 串（结构化可读，不暴露 JSON）。
+    return Object.entries(v as Record<string, unknown>)
+      .filter(([, val]) => val !== null && val !== "")
+      .map(([k, val]) => `${k}: ${formatFieldValue(val)}`)
       .join("；");
   }
-  if (typeof v === "object") return JSON.stringify(v);
   return String(v);
 }
 
@@ -353,6 +436,17 @@ function pickContentField(obj: Record<string, unknown>, keys: string[]): string 
     }
   }
   return "";
+}
+
+/** AI 生成候选时会在 content JSON 里标 recommended —— 只有被推荐的
+ *  想法配得上实心主按钮;其余卡片降为描边,避免整页「按钮海」。 */
+function ideaRecommended(idea: Idea): boolean {
+  try {
+    const c = idea.content ? JSON.parse(idea.content) : null;
+    return c && typeof c === "object" && (c as Record<string, unknown>).recommended === true;
+  } catch {
+    return false;
+  }
 }
 
 function IdeaDetails({ idea }: { idea: Idea }) {
@@ -380,7 +474,7 @@ function IdeaDetails({ idea }: { idea: Idea }) {
 
   return (
     <details className="mt-3 group">
-      <summary className="text-xs text-blue-600 cursor-pointer select-none list-none flex items-center gap-1">
+      <summary className="text-xs text-primary cursor-pointer select-none list-none flex items-center gap-1">
         <ChevronDown className="h-3.5 w-3.5 transition-transform group-open:rotate-180" />
         查看完整方案
       </summary>
@@ -393,103 +487,5 @@ function IdeaDetails({ idea }: { idea: Idea }) {
         ))}
       </div>
     </details>
-  );
-}
-
-/** Status switcher — a compact dropdown that overlays the idea card.
- *
- *  Why a portal: the ideas are rendered inside <Card hover-lift>, which
- *  applies `transform: translateY(-1px)` on hover; transform creates a new
- *  CSS stacking context, so a child `position: absolute` menu with any
- *  z-index is bounded by that card's context. Neighbouring cards (also
- *  with their own stacking contexts) can then paint OVER the menu with
- *  no way to opt out — the user sees the dropdown as "covered".
- *
- *  Rendering the menu via a portal to `document.body` attaches it to the
- *  document root, where the z-index ladder is unconstrained. The bubble's
- *  position is computed from the trigger's bounding rect at the moment
- *  the menu opens, so it tracks correctly even when the user scrolls.
- */
-function StatusMenu({
-  current,
-  open,
-  onOpenChange,
-  onSelect,
-}: {
-  current: string;
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  onSelect: (status: string) => void;
-}) {
-  const triggerRef = useRef<HTMLButtonElement | null>(null);
-  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const el = triggerRef.current;
-    if (!el) return;
-    const r = el.getBoundingClientRect();
-    // Place the bubble below the trigger, left-aligned to its left edge.
-    setPos({ top: r.bottom + 4, left: r.left });
-    // Reposition on scroll/resize so the bubble stays anchored to the
-    // trigger if the page scrolls while the menu is open.
-    const onResize = () => {
-      const el2 = triggerRef.current;
-      if (!el2) return;
-      const r2 = el2.getBoundingClientRect();
-      setPos({ top: r2.bottom + 4, left: r2.left });
-    };
-    window.addEventListener("scroll", onResize, true);
-    window.addEventListener("resize", onResize);
-    return () => {
-      window.removeEventListener("scroll", onResize, true);
-      window.removeEventListener("resize", onResize);
-    };
-  }, [open]);
-
-  return (
-    <span className="relative inline-flex">
-      <button
-        ref={triggerRef}
-        onClick={() => onOpenChange(!open)}
-        className={cn(
-          "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium transition-colors duration-sm ease-out hover:opacity-85",
-          STATUS_COLORS[current] || "bg-muted"
-        )}
-      >
-        {STATUS_LABEL[current] || current}
-        <ChevronDown className="h-3 w-3" />
-      </button>
-      {open && pos && createPortal(
-        <>
-          {/* Full-screen click-catcher that closes the menu. Sits behind the
-              bubble but above all other content; `z-dropdown` is the same
-              z-index as the menu container for the menu group, which is
-              below the modal/toast layers. */}
-          <div
-            className="fixed inset-0 z-dropdown"
-            onClick={() => onOpenChange(false)}
-          />
-          <div
-            style={{ position: "fixed", top: pos.top, left: pos.left }}
-            className="z-dropdown w-32 rounded-lg border border-border bg-card shadow-float p-1 animate-pop origin-top-left"
-          >
-            {STATUS_ORDER.map((s) => (
-              <button
-                key={s}
-                onClick={() => onSelect(s)}
-                className={cn(
-                  "w-full text-left rounded-md px-2.5 py-1.5 text-xs transition-colors duration-sm ease-out hover:bg-muted",
-                  current === s && "font-medium bg-muted"
-                )}
-              >
-                {STATUS_LABEL[s]}
-              </button>
-            ))}
-          </div>
-        </>,
-        document.body,
-      )}
-    </span>
   );
 }
