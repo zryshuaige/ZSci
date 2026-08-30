@@ -72,14 +72,14 @@ const STATUS_META: Record<string, StatusMeta> = {
   not_started:      { Icon: Circle,        color: "text-muted-foreground",   bg: "bg-muted" },
   draft:            { Icon: Circle,        color: "text-muted-foreground",   bg: "bg-muted" },
   waiting_for_user: { Icon: Hourglass,     color: "text-amber-700",          bg: "bg-amber-100", pulse: true },
-  approved:         { Icon: CheckCircle2,  color: "text-blue-700",           bg: "bg-blue-100" },
+  approved:         { Icon: CheckCircle2,  color: "text-emerald-700",        bg: "bg-emerald-100" },
   running:          { Icon: Loader2,       color: "text-blue-700",           bg: "bg-blue-100", spin: true, pulse: true },
   paused:           { Icon: Pause,         color: "text-amber-700",          bg: "bg-amber-100" },
-  completed:        { Icon: CheckCircle2,  color: "text-green-700",          bg: "bg-green-100" },
+  completed:        { Icon: CheckCircle2,  color: "text-emerald-700",        bg: "bg-emerald-100" },
   failed:           { Icon: XCircle,       color: "text-red-700",            bg: "bg-red-100" },
-  needs_revision:   { Icon: AlertTriangle, color: "text-red-700",            bg: "bg-red-100" },
+  needs_revision:   { Icon: AlertTriangle, color: "text-amber-700",          bg: "bg-amber-100" },
   skipped:          { Icon: SkipForward,   color: "text-muted-foreground",   bg: "bg-muted" },
-  outdated:         { Icon: AlertTriangle, color: "text-red-700",            bg: "bg-red-50" },
+  outdated:         { Icon: AlertTriangle, color: "text-slate-600",          bg: "bg-slate-100" },
   archived:         { Icon: Circle,        color: "text-muted-foreground",   bg: "bg-muted" },
 };
 

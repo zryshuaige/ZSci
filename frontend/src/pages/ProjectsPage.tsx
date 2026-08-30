@@ -118,7 +118,7 @@ export default function ProjectsPage() {
 
   return (
     <div className="p-8 max-w-4xl mx-auto space-y-6">
-      {/* Phase B: hero 区 — "把一个想法,变成可验证的研究方向"。
+      {/* Phase B: hero 区 — "把一个想法，变成可验证的研究方向"。
           这是用户首次打开 app 看到的第一屏。Hero 下面是已有的项目列表
           (作为"我的研究"workspace)。新建项目按钮降级为次级操作。 */}
       <Card className="relative overflow-hidden rounded-2xl p-8 space-y-3 border-primary/15 bg-gradient-to-br from-primary/[0.08] via-primary/[0.02] to-transparent">
@@ -139,7 +139,7 @@ export default function ProjectsPage() {
         <Textarea
           ref={heroInputRef}
           rows={3}
-          placeholder="例如:我想研究如何减少大模型在医疗问答中的幻觉……"
+          placeholder="例如：我想研究如何减少大模型在医疗问答中的幻觉……"
           value={heroIdea}
           onChange={(e) => setHeroIdea(e.target.value)}
         />
@@ -230,7 +230,7 @@ export default function ProjectsPage() {
         <EmptyState
           icon={<FolderOpen className="h-10 w-10" />}
           title="还没有研究项目"
-          subtitle="在上方写下你正在思考的研究问题,系统会整理出几个候选方向"
+          subtitle="在上方写下你正在思考的研究问题，系统会整理出几个候选方向"
           action={
             <Button
               variant="outline"
@@ -316,7 +316,7 @@ export default function ProjectsPage() {
       >
         <div className="space-y-3">
           <Input
-            placeholder="方向名称,例如:视觉语言模型的高效微调与鲁棒性"
+            placeholder="方向名称，例如：视觉语言模型的高效微调与鲁棒性"
             value={name}
             onChange={(e) => setName(e.target.value)}
           />
@@ -324,7 +324,7 @@ export default function ProjectsPage() {
             <div className="text-xs text-muted-foreground">需要一个方向名称才能创建。</div>
           )}
           <Textarea
-            placeholder="研究问题或关注重点,例如:在医疗影像上提高诊断准确率,同时保持可解释性"
+            placeholder="研究问题或关注重点，例如：在医疗影像上提高诊断准确率，同时保持可解释性"
             rows={3}
             value={direction}
             onChange={(e) => setDirection(e.target.value)}

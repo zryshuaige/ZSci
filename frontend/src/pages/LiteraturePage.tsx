@@ -111,7 +111,7 @@ export default function LiteraturePage() {
       <Card className="p-4">
         <div className="flex gap-2">
           <Input
-            placeholder="搜索研究方向,例如 parameter efficient fine-tuning for VLMs"
+            placeholder="搜索研究方向，例如 parameter efficient fine-tuning for VLMs"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && runSearch()}
@@ -146,7 +146,7 @@ export default function LiteraturePage() {
               size="sm"
               onClick={() => recommendMutation.mutate()}
               loading={recommendMutation.isPending}
-              title="基于本项目研究方向与已下载论文,按相似度推荐最相关的论文"
+              title="基于本项目研究方向与已下载论文，按相似度推荐最相关的论文"
             >
               <Sparkles className="h-4 w-4" />
               智能推荐相似论文
@@ -228,7 +228,7 @@ export default function LiteraturePage() {
         <EmptyState
           icon={<Search className="h-10 w-10" />}
           title="输入关键词开始检索"
-          subtitle="检索 OpenAlex 与 arXiv 的论文元数据;也可以直接把本机已有的 PDF 导入文献库。"
+          subtitle="检索 OpenAlex 与 arXiv 的论文元数据；也可以直接把本机已有的 PDF 导入文献库。"
         />
       ) : (
         <div className="space-y-2">
@@ -298,7 +298,7 @@ export default function LiteraturePage() {
           <Textarea
             rows={4}
             className="font-mono text-xs"
-            placeholder={"每行一个 PDF 文件的完整路径,例如:\nC:\\Users\\you\\Downloads\\paper.pdf"}
+            placeholder={"每行一个 PDF 文件的完整路径，例如：\nC:\\Users\\you\\Downloads\\paper.pdf"}
             value={importPaths}
             onChange={(e) => setImportPaths(e.target.value)}
           />

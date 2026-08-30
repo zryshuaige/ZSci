@@ -399,17 +399,24 @@ async def stream_events(task_id: str, request: Request, db: Session = Depends(ge
                 if await request.is_disconnected():
                     return
                 event = await sub.next_event(timeout=2.0)
-                if event is not None and event.get("id"):
-                    if event["id"] in seen_ids:
-                        continue
-                    seen_ids.add(event["id"])
-                    event.setdefault(
-                        "created_at", datetime.now(UTC).isoformat(timespec="seconds")
-                    )
-                    yield _sse(event)
-                    if event.get("kind") == "done":
-                        return
-                # Timeout / gap / done-less event: reconcile against the DB.
+                if event is not None:
+                    if event.get("id"):
+                        if event["id"] in seen_ids:
+                            continue
+                        seen_ids.add(event["id"])
+                        event.setdefault(
+                            "created_at", datetime.now(UTC).isoformat(timespec="seconds")
+                        )
+                        yield _sse(event)
+                        if event.get("kind") == "done":
+                            return
+                    # Live event delivered — the bus is healthy, skip the DB
+                    # reconcile. Re-reading the full event history after every
+                    # event made each client cost O(history) per event; the
+                    # timeout branch below stays as the fallback that catches
+                    # status transitions (done / parked) the bus doesn't carry.
+                    continue
+                # Timeout: reconcile against the DB.
                 delivered, status = await _replay_from_db(seen_ids)
                 for item in delivered:
                     yield item

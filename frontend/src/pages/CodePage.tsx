@@ -41,7 +41,7 @@ export default function CodePage() {
       api.runAgentTask(project.id, "code.search_github", {
         selected_papers: selectedPaper ? [selectedPaper] : downloaded.map((p) => p.id),
       }),
-    successMessage: "检索任务已启动,完成后仓库会出现在下方列表",
+    successMessage: "检索任务已启动，完成后仓库会出现在下方列表",
     onSuccess: () => qc.invalidateQueries({ queryKey: qk.repos.byProject(project.id) }),
   });
 

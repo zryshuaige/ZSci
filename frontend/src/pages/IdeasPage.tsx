@@ -109,13 +109,13 @@ export default function IdeasPage() {
       <div className="relative z-chrome">
         <PageHeader
           title="研究想法"
-          subtitle="这里汇总本项目已记录的研究想法,可手动整理,或基于已下载文献挑选进一步评估的候选。"
+          subtitle="这里汇总本项目已记录的研究想法，可手动整理，或基于已下载文献挑选进一步评估的候选。"
           actions={
             <div className="flex gap-2 shrink-0">
               <Button variant="outline" onClick={() => setCreating(true)}>
                 <Plus className="h-4 w-4" /> 手动记录
               </Button>
-              <Button onClick={goGenerate} title="基于项目已下载文献,挑选若干值得进一步评估的研究想法">
+              <Button onClick={goGenerate} title="基于项目已下载文献，挑选若干值得进一步评估的研究想法">
                 <Sparkles className="h-4 w-4" />
                 基于已有研究整理候选
               </Button>
@@ -144,7 +144,7 @@ export default function IdeasPage() {
         <EmptyState
           icon={<Lightbulb className="h-10 w-10" />}
           title="还没有研究想法"
-          subtitle="前往探索流程,系统会结合项目文献整理若干候选方向供你挑选;也可以手动记录一条。"
+          subtitle="前往探索流程，系统会结合项目文献整理若干候选方向供你挑选；也可以手动记录一条。"
           action={
             <Button onClick={goGenerate}>
               <Sparkles className="h-4 w-4" /> 去探索候选方向
@@ -171,7 +171,7 @@ export default function IdeasPage() {
                   </div>
                   {idea.hypothesis && (
                     <div className="text-sm mt-2 leading-relaxed">
-                      <span className="text-muted-foreground">假设:</span>
+                      <span className="text-muted-foreground">假设：</span>
                       <span className="text-foreground">{idea.hypothesis}</span>
                     </div>
                   )}

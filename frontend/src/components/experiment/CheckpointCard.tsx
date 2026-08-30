@@ -102,9 +102,9 @@ export function humanizeTerm(value: string): string {
 export const FIELD_HINTS: Record<string, string> = {
   goal: "这一步要回答的问题",
   research_question: "整个实验要验证的核心问题",
-  hypothesis: "预期会出现的现象,实验就是来检验它的",
+  hypothesis: "预期会出现的现象，实验就是来检验它的",
   metrics: "判断实验是否成功的量化标准",
-  baselines: "用于对比的简化版本,证明每个模块都有贡献",
+  baselines: "用于对比的简化版本，证明每个模块都有贡献",
   run_specs: "实际要运行的每一组配置",
   fairness_note: "保证对比公平的说明",
   compute_plan: "预计消耗的算力与时长",
@@ -112,7 +112,7 @@ export const FIELD_HINTS: Record<string, string> = {
   recommendation: "系统建议",
   datasets: "为本研究检索到的公开数据集",
   tasks: "为本研究检索到的评测任务",
-  sota: "已有最优方法的成绩,用来设定目标",
+  sota: "已有最优方法的成绩，用来设定目标",
   query: "用于检索基准的关键词",
   counts: "各类候选的数量",
   files_written: "已写入工作区的文件",
@@ -230,11 +230,11 @@ const SUMMARY_LIMIT = 6;
 /** 每个阶段「确认后会发生什么」的一句话说明——用户不该靠猜来理解
  *  「确认并继续」按钮的后果。与后端 5 阶段注册表一一对应。 */
 const CONFIRM_NEXT: Record<string, string> = {
-  phase_0_scope: "AI 将基于研究问题设计方案:给出评测指标、对照基线与运行配置。",
+  phase_0_scope: "AI 将基于研究问题设计方案：给出评测指标、对照基线与运行配置。",
   phase_1_plan: "进入代码生成,AI 会写出实验代码并自动做一轮快速自检。",
-  phase_2_build: "开始首轮实验运行,这一步耗时最长,期间你可以随时暂停。",
-  phase_3_run: "AI 会汇总各次运行结果,与已有最优方法对比并生成报告。",
-  phase_4_report: "本轮实验收尾,你可以随时在「实验」页查看报告与数据。",
+  phase_2_build: "开始首轮实验运行，这一步耗时最长，期间你可以随时暂停。",
+  phase_3_run: "AI 会汇总各次运行结果，与已有最优方法对比并生成报告。",
+  phase_4_report: "本轮实验收尾，你可以随时在「实验」页查看报告与数据。",
 };
 
 export function CheckpointCard({ stage, onDecide, busy }: CheckpointCardProps) {
@@ -337,7 +337,7 @@ export function CheckpointCard({ stage, onDecide, busy }: CheckpointCardProps) {
             className="w-full h-20 rounded border border-border bg-background p-2 text-sm"
             value={editText}
             onChange={(e) => setEditText(e.target.value)}
-            placeholder="例如:对照方法只保留仅文本,并增加一组更大的学习率对照"
+            placeholder="例如：对照方法只保留仅文本，并增加一组更大的学习率对照"
           />
           <div className="flex gap-2">
             <Button size="sm" variant="outline" onClick={() => setEditOpen(false)} disabled={busy}>

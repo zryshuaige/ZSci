@@ -30,12 +30,12 @@ interface StepBullet {
 }
 
 const DEFAULT_STEPS: StepBullet[] = [
-  { title: "梳理已有研究中的可对照基线和数据集", detail: "结合本项目已下载文献,挑出 1-3 个与所选方向最相关的结果作为参考对照。" },
-  { title: "拟定评价指标与对照设置", detail: "明确对照方法、目标指标以及随机种子,确保首轮结果可重复比较。" },
-  { title: "准备可运行的实验代码", detail: "生成项目结构、训练脚本与配置文件,并使其可以在本环境下复现。" },
-  { title: "执行运行前的环境与代码检查", detail: "校验依赖、运行一次最短流程,确认设置无误后再正式计算。" },
-  { title: "运行小规模首轮验证", detail: "在小数据集或短迭代下获得初步可对照的指标,用以判断方向是否值得继续。" },
-  { title: "整理本轮结果,给出后续方向建议", detail: "汇总本轮结论与初步证据,并列出若干值得进一步比较的后续方案。" },
+  { title: "梳理已有研究中的可对照基线和数据集", detail: "结合本项目已下载文献，挑出 1-3 个与所选方向最相关的结果作为参考对照。" },
+  { title: "拟定评价指标与对照设置", detail: "明确对照方法、目标指标以及随机种子，确保首轮结果可重复比较。" },
+  { title: "准备可运行的实验代码", detail: "生成项目结构、训练脚本与配置文件，并使其可以在本环境下复现。" },
+  { title: "执行运行前的环境与代码检查", detail: "校验依赖、运行一次最短流程，确认设置无误后再正式计算。" },
+  { title: "运行小规模首轮验证", detail: "在小数据集或短迭代下获得初步可对照的指标，用以判断方向是否值得继续。" },
+  { title: "整理本轮结果，给出后续方向建议", detail: "汇总本轮结论与初步证据，并列出若干值得进一步比较的后续方案。" },
 ];
 
 export default function ExperimentPreviewPlanPage() {
@@ -117,11 +117,11 @@ export default function ExperimentPreviewPlanPage() {
   const estMinutes = plan?.est_minutes ?? 120;
   const risks = (plan?.risks && plan.risks.length > 0)
     ? plan.risks
-    : ["数据下载或解析可能受限", "小样本首轮验证,结论仅作初判"];
+    : ["数据下载或解析可能受限", "小样本首轮验证，结论仅作初判"];
   const success = plan?.success_means
     ?? "在主要指标上观察到与对照的可重复差异(幅度视任务而定)";
   const failure = plan?.failure_means
-    ?? "未观察到与对照的稳定差异,或复现性不足";
+    ?? "未观察到与对照的稳定差异，或复现性不足";
   // 后端给的 metrics 是 [{name, definition, aggregation}];前端只取 name 拼读。
   const metricNames = (plan?.metrics || []).map((m) => m.name).filter(Boolean);
   const metrics = metricNames.length > 0

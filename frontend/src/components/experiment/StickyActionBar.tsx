@@ -68,7 +68,7 @@ const ACTIONS: Record<Variant, { tagline: string; primary: ActionDef; secondary:
     secondary: [{ key: "showReason", label: "查看详细原因", icon: Eye }],
   },
   paused: {
-    tagline: "已暂停,进度已保存",
+    tagline: "已暂停，进度已保存",
     primary: { key: "resume", label: "继续实验", icon: Play },
     secondary: [{ key: "editPlan", label: "查看阶段详情", icon: Eye }],
   },

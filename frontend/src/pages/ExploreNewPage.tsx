@@ -153,7 +153,7 @@ export default function ExploreNewPage(_: ExploreNewPageProps) {
         </div>
         <PageHeader
           title="研究问题概述"
-          subtitle="根据你的描述,系统先整理出对研究问题的理解,并据此给出若干差异化的候选方向供你选择。"
+          subtitle="根据你的描述，系统先整理出对研究问题的理解，并据此给出若干差异化的候选方向供你选择。"
         />
       </div>
 

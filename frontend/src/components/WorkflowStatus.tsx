@@ -283,9 +283,9 @@ function WorkflowRow({ t, onClick }: { t: ActiveWorkflowTask; onClick: () => voi
       )}
     >
       {t.task_type === "experiment.autonomous_run" ? (
-        <FlaskConical className={cn("h-3.5 w-3.5 mt-0.5 shrink-0", isRecent ? (failed ? "text-red-400" : done ? "text-green-500" : "text-blue-400") : "text-blue-500")} />
+        <FlaskConical className={cn("h-3.5 w-3.5 mt-0.5 shrink-0", isRecent ? (failed ? "text-red-400" : done ? "text-emerald-500" : "text-blue-400") : "text-blue-500")} />
       ) : isRecent ? (
-        failed ? <XCircle className="h-3.5 w-3.5 mt-0.5 shrink-0 text-red-400" /> : <CheckCircle2 className="h-3.5 w-3.5 mt-0.5 shrink-0 text-green-500" />
+        failed ? <XCircle className="h-3.5 w-3.5 mt-0.5 shrink-0 text-red-400" /> : <CheckCircle2 className="h-3.5 w-3.5 mt-0.5 shrink-0 text-emerald-500" />
       ) : (
         <Bot className="h-3.5 w-3.5 mt-0.5 shrink-0 text-violet-500" />
       )}
@@ -343,7 +343,7 @@ function JobRow({ j, onClick }: { j: Job; onClick: () => void }) {
       ) : failed ? (
         <XCircle className="h-3.5 w-3.5 mt-0.5 shrink-0 text-red-400" />
       ) : done ? (
-        <CheckCircle2 className="h-3.5 w-3.5 mt-0.5 shrink-0 text-green-500" />
+        <CheckCircle2 className="h-3.5 w-3.5 mt-0.5 shrink-0 text-emerald-500" />
       ) : (
         <Icon className="h-3.5 w-3.5 mt-0.5 shrink-0 text-blue-500" />
       )}

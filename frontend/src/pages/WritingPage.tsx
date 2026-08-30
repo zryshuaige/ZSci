@@ -216,7 +216,7 @@ export default function WritingPage() {
       setCompileJobId(null);
       // Chinese summary in the toast; the raw LaTeX error stays visible in
       // the preview pane for debugging.
-      showFriendlyError(new Error("编译失败:请检查 LaTeX 源文件,或确认本地已安装 TeX 环境。"));
+      showFriendlyError(new Error("编译失败：请检查 LaTeX 源文件，或确认本地已安装 TeX 环境。"));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [compileJob?.status, compileJob?.recent]);
@@ -508,7 +508,7 @@ export default function WritingPage() {
       <ConfirmDialog
         open={pendingSwitch !== null}
         title="有未保存的修改"
-        description={`切换到「${pendingSwitch ?? ""}」将丢失当前文件中未保存的修改。可先取消,用 ⌘S / Ctrl+S 保存后再切换。`}
+        description={`切换到「${pendingSwitch ?? ""}」将丢失当前文件中未保存的修改。可先取消，用 ⌘S / Ctrl+S 保存后再切换。`}
         confirmLabel="放弃修改并切换"
         danger
         onConfirm={() => {
@@ -522,7 +522,7 @@ export default function WritingPage() {
       <ConfirmDialog
         open={pendingTemplate !== null}
         title={`切换到「${pendingTemplate?.label ?? ""}」?`}
-        description="将覆盖 main.tex(文档类与导言区),章节内容与 references.bib 会保留;当前 main.tex 未保存的修改会丢失。"
+        description="将覆盖 main.tex(文档类与导言区),章节内容与 references.bib 会保留；当前 main.tex 未保存的修改会丢失。"
         confirmLabel="切换模板"
         danger
         onConfirm={() => {

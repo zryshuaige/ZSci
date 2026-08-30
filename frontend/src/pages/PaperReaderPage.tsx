@@ -81,7 +81,7 @@ export default function PaperReaderPage() {
 
   const parseMutation = useToastMutation({
     mutationFn: () => api.parsePaper(paperId!),
-    successMessage: (r) => `解析完成,共 ${r.pages} 页`,
+    successMessage: (r) => `解析完成，共 ${r.pages} 页`,
     onSuccess: () => qc.invalidateQueries({ queryKey: qk.papers.one(paperId!) }),
   });
 

@@ -67,7 +67,7 @@ export default function ProjectOverview() {
     if (waitingExps.length > 0) {
       return {
         step: `待处理 · ${waitingExps.length} 个实验等你确认`,
-        hint: "实验流程已停在关键节点,确认后才会继续。决策比补充文献更紧急。",
+        hint: "实验流程已停在关键节点，确认后才会继续。决策比补充文献更紧急。",
         cta: "去决策",
         to: `/projects/${project.id}/experiments/${waitingExps[0].id}`,
       };
@@ -75,7 +75,7 @@ export default function ProjectOverview() {
     if (runningExps.length > 0) {
       return {
         step: `进行中 · ${runningExps.length} 个实验正在运行`,
-        hint: "实验在自动推进。你可以先做别的,有结论时这里会提醒你。",
+        hint: "实验在自动推进。你可以先做别的，有结论时这里会提醒你。",
         cta: "查看进度",
         to: `/projects/${project.id}/experiments/${runningExps[0].id}`,
       };
@@ -104,14 +104,14 @@ export default function ProjectOverview() {
     if (exps.length === 0) {
       return {
         step: "第三步 · 做实验",
-        hint: "已有候选研究方向。挑一个方向创建实验,验证它的核心假设。",
+        hint: "已有候选研究方向。挑一个方向创建实验，验证它的核心假设。",
         cta: "去做实验",
         to: `/projects/${project.id}/experiments`,
       };
     }
     return {
       step: "实验进行中",
-      hint: "已有实验记录。回到实验工作台跟踪进展,或基于结果开始写作。",
+      hint: "已有实验记录。回到实验工作台跟踪进展，或基于结果开始写作。",
       cta: "查看实验",
       to: `/projects/${project.id}/experiments`,
     };
@@ -135,7 +135,7 @@ export default function ProjectOverview() {
                   className="w-full h-20 rounded-md border border-border bg-background p-2 text-sm"
                   value={dirDraft}
                   onChange={(e) => setDirDraft(e.target.value)}
-                  placeholder="用一两句话概括这个项目想研究什么,例如:多模态科研数据融合如何加速材料发现"
+                  placeholder="用一两句话概括这个项目想研究什么，例如：多模态科研数据融合如何加速材料发现"
                   autoFocus
                 />
                 <div className="flex gap-2">
@@ -180,7 +180,7 @@ export default function ProjectOverview() {
       {anyError && !anyLoading && (
         <Card className="p-6 text-center">
           <AlertTriangle className="mx-auto h-6 w-6 text-destructive/70" />
-          <div className="mt-2 text-sm text-muted-foreground">项目概览加载失败,请稍后重试</div>
+          <div className="mt-2 text-sm text-muted-foreground">项目概览加载失败，请稍后重试</div>
           <Button size="sm" variant="outline" className="mt-3" onClick={retryAll}>
             <RotateCw className="h-3.5 w-3.5" /> 重试
           </Button>

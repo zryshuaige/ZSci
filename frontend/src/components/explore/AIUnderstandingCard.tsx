@@ -93,7 +93,7 @@ export function AIUnderstandingCard({
             rows={4}
             value={revisedText}
             onChange={(e) => onRevisedTextChange(e.target.value)}
-            placeholder="例如:其实我更想关注的是医疗影像方向,而不是问答……"
+            placeholder="例如：其实我更想关注的是医疗影像方向，而不是问答……"
           />
           <div className="flex justify-end gap-2">
             <Button variant="outline" size="sm" onClick={onCancelRevision} disabled={busy}>
@@ -135,7 +135,7 @@ export function summariseCandidate(
     return {
       understanding: originalText.trim()
         ? "系统将基于你描述的方向生成若干候选研究方向。"
-        : "还没有研究描述。点「修改描述」写下你想研究的方向,系统会据此整理差异化的候选方向供你挑选。",
+        : "还没有研究描述。点「修改描述」写下你想研究的方向，系统会据此整理差异化的候选方向供你挑选。",
       goal: null,
       familiarity: null,
     };

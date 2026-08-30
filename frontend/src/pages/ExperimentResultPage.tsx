@@ -25,7 +25,7 @@ type NextStepsData = NonNullable<Awaited<ReturnType<typeof api.nextSteps>>>;
 type NextStep = NextStepsData["next_steps"][number];
 
 const JUDGEMENT_LABEL: Record<string, string> = {
-  continue: "初步支持,值得继续",
+  continue: "初步支持，值得继续",
   adjust: "需要调整实验设置",
   insufficient: "证据尚不充分",
   pivot: "可考虑尝试替代方向",
@@ -142,13 +142,13 @@ export default function ExperimentResultPage() {
     : isWaiting
       ? {
           title: "实验在等你确认",
-          desc: "流程已停在某个关键节点,需要你确认后才会继续往下走。",
+          desc: "流程已停在某个关键节点，需要你确认后才会继续往下走。",
           cta: "去确认并继续",
         }
       : isRunning
         ? {
             title: "实验还在进行中",
-            desc: "各阶段还没有全部跑完,结论和指标要等实验完成后才会出现在这里。",
+            desc: "各阶段还没有全部跑完，结论和指标要等实验完成后才会出现在这里。",
             cta: "查看实时进度",
           }
         : null;
@@ -192,7 +192,7 @@ export default function ExperimentResultPage() {
         <div className="text-sm text-foreground leading-relaxed">
           {next?.conclusion
             || (exp?.research_question
-              ? `已完成对 "${exp.research_question.slice(0, 40)}${exp.research_question.length > 40 ? "…" : ""}" 的首轮小规模验证,主要指标与可能的解释见下方。`
+              ? `已完成对 "${exp.research_question.slice(0, 40)}${exp.research_question.length > 40 ? "…" : ""}" 的首轮小规模验证，主要指标与可能的解释见下方。`
               : "本轮实验的主要指标与原始记录可在实验详情页查看。")}
         </div>
         {next?.judgement && (

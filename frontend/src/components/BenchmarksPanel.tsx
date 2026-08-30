@@ -99,8 +99,9 @@ export default function BenchmarksPanel({
 
   return (
     <Card className={cn("p-4 space-y-3 flex flex-col min-h-0", className)}>
-      <div className="flex items-center justify-between gap-2 shrink-0">
-        <div className="font-medium text-sm">数据集与基准</div>
+      {/* 页头已有「数据集与基准」标题（BenchmarksPage），这里只保留来源注记，
+          避免同一屏出现两个重复标题。 */}
+      <div className="flex justify-end shrink-0">
         <div className="text-[11px] text-muted-foreground shrink-0">来自 HuggingFace</div>
       </div>
 
@@ -194,7 +195,7 @@ export default function BenchmarksPanel({
               variant="inline"
               icon={<Database className="h-8 w-8" />}
               title="还没有加入任何数据集"
-              subtitle="搜索后点「加入项目」,或直接手动录入。加入后可关联到具体实验,供后续 AI 选用。"
+              subtitle="搜索后点「加入项目」，或直接手动录入。加入后可关联到具体实验，供后续 AI 选用。"
               action={
                 <Button size="sm" variant="outline" onClick={() => setAdding(true)}>
                   <Plus className="h-3.5 w-3.5" /> 手动添加

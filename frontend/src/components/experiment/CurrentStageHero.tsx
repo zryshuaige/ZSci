@@ -116,7 +116,7 @@ export function CurrentStageHero({
       className={cn(
         "rounded-xl border bg-card p-6 md:p-8 shadow-soft",
         variant === "failed" && "border-red-300 bg-red-50/40",
-        variant === "completed" && "border-green-300 bg-green-50/30",
+        variant === "completed" && "border-emerald-300 bg-emerald-50/30",
         variant === "waiting_user" && "border-amber-300 bg-amber-50/40",
         variant === "paused" && "border-amber-200 bg-amber-50/20",
       )}
@@ -191,8 +191,8 @@ function DraftVariant({
       </h2>
       <p className="text-sm text-muted-foreground">
         {hasRq
-          ? `研究问题:${exp.research_question}`
-          : "还没有研究问题。点击下方按钮填写研究问题,填写后即可启动实验。"}
+          ? `研究问题：${exp.research_question}`
+          : "还没有研究问题。点击下方按钮填写研究问题，填写后即可启动实验。"}
       </p>
       {hasRq ? (
         <Button onClick={onStart}>
@@ -280,7 +280,7 @@ function CompletedVariant({
 }) {
   return (
     <div className="flex flex-col items-start gap-3">
-      <div className="flex items-center gap-2 text-green-700">
+      <div className="flex items-center gap-2 text-emerald-700">
         <CheckCircle2 className="h-5 w-5" />
         <span className="text-sm font-medium">首轮实验已完成</span>
       </div>
@@ -357,7 +357,7 @@ function FailedVariant({
         实验暂时停下来了
       </h2>
       <p className="text-sm text-muted-foreground leading-relaxed">
-        {reason || "系统在执行本阶段时遇到了一些问题。你可以查看详细原因,或在下方选择其他操作。"}
+        {reason || "系统在执行本阶段时遇到了一些问题。你可以查看详细原因，或在下方选择其他操作。"}
       </p>
       <div className="flex flex-wrap gap-2 pt-2">
         <Button onClick={onRetry}>

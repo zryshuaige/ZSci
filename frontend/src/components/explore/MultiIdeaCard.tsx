@@ -84,7 +84,7 @@ export function MultiIdeaCard({
       )}
       {candidate.hypothesis && (
         <p className="mt-2 text-xs text-muted-foreground leading-relaxed line-clamp-3">
-          <span className="font-medium">研究问题:</span>
+          <span className="font-medium">研究问题：</span>
           {candidate.hypothesis}
         </p>
       )}

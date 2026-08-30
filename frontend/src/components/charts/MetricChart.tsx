@@ -55,7 +55,7 @@ export function MetricChart({ metrics }: { metrics: Metric[] }) {
           className="text-xs px-2 py-0.5 rounded border border-border hover:bg-muted disabled:opacity-40"
           onClick={() => setLogScale((s) => !s)}
           disabled={!allPositive}
-          title={allPositive ? "切换对数坐标" : "含非正值,无法使用对数坐标"}
+          title={allPositive ? "切换对数坐标" : "含非正值，无法使用对数坐标"}
         >
           {useLog ? "线性" : "对数"}
         </button>
@@ -120,7 +120,7 @@ export function CompareChart({ runsMetrics }: { runsMetrics: { runId: string; me
           className="text-xs px-2 py-0.5 rounded border border-border hover:bg-muted disabled:opacity-40"
           onClick={() => setLogScale((s) => !s)}
           disabled={!allPositive || runsMetrics.length === 0}
-          title={allPositive ? "切换对数坐标" : "含非正值,无法使用对数坐标"}
+          title={allPositive ? "切换对数坐标" : "含非正值，无法使用对数坐标"}
         >
           {useLog ? "线性" : "对数"}
         </button>

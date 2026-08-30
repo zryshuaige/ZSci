@@ -122,44 +122,46 @@ export const TONE_HEX: Record<Tone, string> = {
 };
 
 /** Tailwind class pairs per tone — the ONLY place status colors are defined.
- *  Includes both soft (badge) and solid (button/dot) variants. */
+ *  Includes both soft (badge) and solid (button/dot) variants. Dot shades
+ *  match TONE_HEX (both are the -600 stops) so badges and chart series are
+ *  pixel-identical hues. */
 export const TONE_CLASSES: Record<
   Tone,
   { soft: string; dot: string; text: string; border: string }
 > = {
   green: {
     soft: "bg-emerald-50 text-emerald-700 border border-emerald-200",
-    dot: "bg-emerald-500",
+    dot: "bg-emerald-600",
     text: "text-emerald-700",
     border: "border-emerald-200",
   },
   red: {
     soft: "bg-red-50 text-red-700 border border-red-200",
-    dot: "bg-red-500",
+    dot: "bg-red-600",
     text: "text-red-700",
     border: "border-red-200",
   },
   blue: {
     soft: "bg-blue-50 text-blue-700 border border-blue-200",
-    dot: "bg-blue-500",
+    dot: "bg-blue-600",
     text: "text-blue-700",
     border: "border-blue-200",
   },
   amber: {
     soft: "bg-amber-50 text-amber-700 border border-amber-200",
-    dot: "bg-amber-500",
+    dot: "bg-amber-600",
     text: "text-amber-700",
     border: "border-amber-200",
   },
   slate: {
     soft: "bg-slate-100 text-slate-600 border border-slate-200",
-    dot: "bg-slate-400",
+    dot: "bg-slate-500",
     text: "text-slate-600",
     border: "border-slate-200",
   },
   violet: {
     soft: "bg-violet-50 text-violet-700 border border-violet-200",
-    dot: "bg-violet-500",
+    dot: "bg-violet-600",
     text: "text-violet-700",
     border: "border-violet-200",
   },

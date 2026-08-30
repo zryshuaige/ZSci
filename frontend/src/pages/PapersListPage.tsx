@@ -81,7 +81,7 @@ export default function PapersListPage() {
         <EmptyState
           icon={<FileText className="h-10 w-10" />}
           title="还没有已下载的论文"
-          subtitle="到文献库检索并下载论文,或导入本地 PDF,之后回到这里阅读"
+          subtitle="到文献库检索并下载论文，或导入本地 PDF,之后回到这里阅读"
           action={
             <Link to={`/projects/${project.id}/literature`}>
               <Button size="sm">

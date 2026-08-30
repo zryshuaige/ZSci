@@ -488,7 +488,7 @@ export default function ExperimentDetailPage() {
                     {decisionHistory.length > 0 ? (
                       <DecisionHistory history={decisionHistory as Array<Record<string, unknown>>} />
                     ) : (
-                      <EmptyHint text="还没有任何决策记录 —— 启动实验后,每个阶段完成时你都会在这里确认。" />
+                      <EmptyHint text="还没有任何决策记录 —— 启动实验后，每个阶段完成时你都会在这里确认。" />
                     )}
                   </div>
                 )}
@@ -534,7 +534,7 @@ export default function ExperimentDetailPage() {
                     <div className="p-4">
                       <div className="font-medium text-sm">运行记录</div>
                       {runs.length === 0 ? (
-                        <EmptyHint text="还没有运行记录。启动自主实验或手动运行后,这里会显示每次运行的命令、日志与指标。" />
+                        <EmptyHint text="还没有运行记录。启动自主实验或手动运行后，这里会显示每次运行的命令、日志与指标。" />
                       ) : (
                         <div className="mt-2 divide-y divide-border/60">
                           {runs.map((r, idx) => (
@@ -580,7 +580,7 @@ export default function ExperimentDetailPage() {
                       rows={2}
                       value={rqDraft}
                       onChange={(e) => setRqDraft(e.target.value)}
-                      placeholder="例如:相比基线,新方法在 X 数据集上的准确率是否提升 ≥2%?"
+                      placeholder="例如：相比基线，新方法在 X 数据集上的准确率是否提升 ≥2%?"
                       className="text-sm"
                     />
                     {rqDirty && (
@@ -652,10 +652,10 @@ export default function ExperimentDetailPage() {
 
       <ConfirmDialog
         open={confirmingAbort}
-        title="结束本次实验?"
+        title="结束本次实验？"
         busy={decideMutation.isPending}
         danger
-        description="当前阶段的进度会保留,但本轮工作流将暂停。你可以之后从暂停状态继续。"
+        description="当前阶段的进度会保留，但本轮工作流将暂停。你可以之后从暂停状态继续。"
         confirmLabel="结束本次"
         onCancel={() => setConfirmingAbort(false)}
         onConfirm={() => {
@@ -760,7 +760,7 @@ function RunStream({ runId, expId }: { runId: string; expId: string }) {
         {streamStatus === "done" && "\n【运行已结束】"}
       </pre>
       {streamStatus === "retrying" && (
-        <div className="text-xs text-amber-600 mt-1">日志流断开,正在重连…</div>
+        <div className="text-xs text-amber-600 mt-1">日志流断开，正在重连…</div>
       )}
       {streamStatus === "failed" && (
         <div className="text-xs text-destructive mt-1 flex items-center gap-2">

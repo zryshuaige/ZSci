@@ -189,7 +189,7 @@ function ModelGatewayCard({ configuredRoles }: { configuredRoles: string[] }) {
         base_url: baseUrl.trim() === "" ? "" : baseUrl.trim(),
         api_key: apiKey || undefined,
       }),
-    successMessage: "已保存,即时生效",
+    successMessage: "已保存，即时生效",
     onSuccess: (cur) => {
       // Re-seed from the server response so the form reflects canonical state
       // (e.g. matched_preset_id, resolved model) and the key field clears.
@@ -216,11 +216,11 @@ function ModelGatewayCard({ configuredRoles }: { configuredRoles: string[] }) {
     onSuccess: ({ cfg, ms }) => {
       const cur = cfg.current;
       if (!cur.model) {
-        showInfo("尚未保存模型配置,请先选择供应商并保存。");
+        showInfo("尚未保存模型配置，请先选择供应商并保存。");
         return;
       }
       if (cur.api_key_env && !cur.api_key_set) {
-        showInfo(`后端连接正常,但 ${cur.api_key_env} 未设置——请填入 Key 并保存。`);
+        showInfo(`后端连接正常，但 ${cur.api_key_env} 未设置——请填入 Key 并保存。`);
         return;
       }
       showSuccess(`连接正常 · ${cur.model} · ${ms}ms`);
@@ -239,14 +239,14 @@ function ModelGatewayCard({ configuredRoles }: { configuredRoles: string[] }) {
 
   const handleTest = () => {
     if (hasUnsaved) {
-      showInfo("配置有未保存的修改,请先「保存」,再测试连接。");
+      showInfo("配置有未保存的修改，请先「保存」，再测试连接。");
       return;
     }
     testMutation.mutate();
   };
 
   const showBaseUrl = !!selectedPreset && (selectedPreset.id === "custom" || !!selectedPreset.base_url);
-  const keyPlaceholder = current?.api_key_set ? "已配置,留空保持不变" : "请输入 API Key";
+  const keyPlaceholder = current?.api_key_set ? "已配置，留空保持不变" : "请输入 API Key";
 
   // 错误≠空:配置加载失败给错误卡 + 重试,而不是永远停在骨架屏。
   if (llmQuery.isError) {
@@ -312,7 +312,7 @@ function ModelGatewayCard({ configuredRoles }: { configuredRoles: string[] }) {
         <Input
           value={model}
           onChange={(e) => setModel(e.target.value)}
-          placeholder="模型名称,如 deepseek-chat"
+          placeholder="模型名称，如 deepseek-chat"
           className="font-mono text-xs"
         />
       </div>

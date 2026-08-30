@@ -34,8 +34,8 @@ const STATUS_ICONS: Record<string, React.ComponentType<{ className?: string }>> 
 
 /** 助手任务类型：分段控件选项。 */
 const TASK_KINDS = [
-  { key: "trend", label: "研究趋势分析", icon: TrendingUp, sample: "分析本项目的文献时间线,概括近三年的技术趋势与热点变化" },
-  { key: "hypo", label: "想法灵感", icon: Lightbulb, sample: "基于已下载文献,提出 3 个值得验证的研究假设" },
+  { key: "trend", label: "研究趋势分析", icon: TrendingUp, sample: "分析本项目的文献时间线，概括近三年的技术趋势与热点变化" },
+  { key: "hypo", label: "想法灵感", icon: Lightbulb, sample: "基于已下载文献，提出 3 个值得验证的研究假设" },
   { key: "code", label: "代码检索", icon: Github, sample: "检索与本研究方向相关的官方代码仓库" },
 ] as const;
 
@@ -131,7 +131,7 @@ export default function AgentPage() {
         </div>
         <Button onClick={() => runTask.mutate(kind)} disabled={busy} loading={runTask.isPending}>
           <Sparkles className="h-4 w-4" />
-          {runTask.isPending ? "任务已提交,执行中…" : "开始分析"}
+          {runTask.isPending ? "任务已提交，执行中…" : "开始分析"}
         </Button>
         {activeTaskStatus.isActive && (
           <div className="text-xs text-muted-foreground">
@@ -175,8 +175,8 @@ export default function AgentPage() {
           </div>
           <EmptyState
             icon={<Bot className="h-8 w-8" />}
-            title="选择任务类型与请求,点「开始分析」"
-            subtitle="任务进度也会出现在左侧「进行中的任务」,随时可点回来查看"
+            title="选择任务类型与请求，点「开始分析」"
+            subtitle="任务进度也会出现在左侧「进行中的任务」，随时可点回来查看"
           />
         </div>
       )}
@@ -219,7 +219,7 @@ function TaskDetail({ taskId, projectId }: { taskId: string; projectId: string }
 
   const decide = useToastMutation({
     mutationFn: (approved: boolean) => api.decideApproval(taskId, approved),
-    successMessage: (_d, approved) => (approved ? "已批准,任务继续执行" : "已拒绝"),
+    successMessage: (_d, approved) => (approved ? "已批准，任务继续执行" : "已拒绝"),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.agent.task(taskId) });
       qc.invalidateQueries({ queryKey: qk.agent.approvals(taskId) });

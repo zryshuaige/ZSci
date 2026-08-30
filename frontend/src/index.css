@@ -159,6 +159,26 @@ h1 {
     color: currentColor;
     opacity: 0.6;
   }
+
+  /* 细滚动条 —— 日志/时间线等内嵌滚动区用，替代 Windows 默认的宽轨道。 */
+  .thin-scrollbar {
+    scrollbar-width: thin;
+    scrollbar-color: #cbd5e1 transparent;
+  }
+  .thin-scrollbar::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  .thin-scrollbar::-webkit-scrollbar-thumb {
+    border-radius: 9999px;
+    background: #cbd5e1;
+  }
+  .thin-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: #94a3b8;
+  }
+  .thin-scrollbar::-webkit-scrollbar-track {
+    background: transparent;
+  }
 }
 
 /* Hover lift — gated behind precise pointer (apple-design §14).

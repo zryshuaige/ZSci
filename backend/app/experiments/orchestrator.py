@@ -323,7 +323,7 @@ class StageContext:
                 outputs=summary,
             )
             emit_event(db, self.task_id, "step",
-                       f"「{STAGE_REGISTRY[stage_key].name_zh}」已完成（无需确认,自动继续）", {
+                       f"「{STAGE_REGISTRY[stage_key].name_zh}」已完成（无需确认，自动继续）", {
                 "stage_key": stage_key,
             })
             db.commit()
@@ -371,7 +371,7 @@ def _open_checkpoint(
         )
         db.add(apv)
         db.commit()
-        emit_event(db, ctx.task_id, "step", f"「{STAGE_REGISTRY[stage_key].name_zh}」已完成,等待你的确认", {
+        emit_event(db, ctx.task_id, "step", f"「{STAGE_REGISTRY[stage_key].name_zh}」已完成，等待你的确认", {
             "stage_key": stage_key,
             "summary_keys": list(summary.keys()),
         })
@@ -465,7 +465,7 @@ def apply_stage_decision(
             for ds in invalidated:
                 ds_name = STAGE_REGISTRY[ds].name_zh if ds in STAGE_REGISTRY else ds
                 emit_event(db, task_id, "warning",
-                           f"你跳过了「{STAGE_REGISTRY[stage_key].name_zh}」,后续的「{ds_name}」结果已作废,需要重做")
+                           f"你跳过了「{STAGE_REGISTRY[stage_key].name_zh}」，后续的「{ds_name}」结果已作废，需要重做")
         if exp is not None:
             exp.overall_status = "running"
         return True
@@ -563,7 +563,7 @@ async def run_experiment_loop(
         with _sessions()() as db:
             _set_overall_status(db, experiment_id, "running")
             _set_task_status(db, task_id, "running")
-            emit_event(db, task_id, "step", "自动化实验已启动（共 5 个阶段,关键节点会停下来等你确认）", {
+            emit_event(db, task_id, "step", "自动化实验已启动（共 5 个阶段，关键节点会停下来等你确认）", {
                 "mode": input_data.get("mode", "interactive"),
             })
             db.commit()
@@ -600,7 +600,7 @@ async def run_experiment_loop(
             with _sessions()() as db:
                 _set_stage_status(db, experiment_id, stage_key, "running")
                 _set_overall_status(db, experiment_id, "running", current_stage=stage_key)
-                emit_event(db, task_id, "step", f"开始执行:{sd.name_zh}")
+                emit_event(db, task_id, "step", f"开始执行「{sd.name_zh}」")
 
             try:
                 with _sessions()() as db:
@@ -620,9 +620,13 @@ async def run_experiment_loop(
                     artifacts=result.artifacts_json,
                 )
                 _set_overall_status(db, experiment_id, "running", current_stage=stage_key)
-                emit_event(db, task_id, "step", f"「{sd.name_zh}」完成", {
-                    "summary_keys": list(result.summary.keys()),
-                })
+                # 交互模式下紧随其后的 checkpoint 事件已经说明「已完成，
+                # 等待确认」，这里不再发一条几乎相同的完成消息，避免日志
+                # 里同一节点出现两条语义重复的记录。
+                if input_data.get("mode") == "auto":
+                    emit_event(db, task_id, "step", f"「{sd.name_zh}」已完成", {
+                        "summary_keys": list(result.summary.keys()),
+                    })
 
             # ---- checkpoint
             if input_data.get("mode") == "auto":
@@ -649,7 +653,7 @@ async def run_experiment_loop(
             else:
                 _set_overall_status(db, experiment_id, "paused")
                 _set_task_status(db, task_id, "stopped")
-                emit_event(db, task_id, "step", "实验已暂停,可随时继续")
+                emit_event(db, task_id, "step", "实验已暂停，可随时继续")
             db.commit()
     except Exception as exc:  # noqa: BLE001
         logger.exception("experiment loop %s crashed", task_id)
@@ -687,7 +691,7 @@ async def _resolve_adopted_checkpoint(
             task.status = "awaiting_approval"
             task.stage_key = stage_key
         _set_overall_status(db, experiment_id, "waiting_user", current_stage=stage_key)
-        emit_event(db, task_id, "step", f"继续等待你的确认:「{STAGE_REGISTRY[stage_key].name_zh}」")
+        emit_event(db, task_id, "step", f"继续等待你的确认：「{STAGE_REGISTRY[stage_key].name_zh}」")
         db.commit()
 
     if approval_id is None:
@@ -756,7 +760,7 @@ def _decision_event_message(stage_key: str, decision: str, continue_after: bool)
     name = STAGE_REGISTRY[stage_key].name_zh if stage_key in STAGE_REGISTRY else stage_key
     verb = _DECISION_VERB_ZH.get(decision, decision)
     tail = "流程继续进入下一阶段" if continue_after else "实验到此停止"
-    return f"你{verb}了「{name}」,{tail}"
+    return f"你{verb}了「{name}」，{tail}"
 
 
 def _mark_phase_failed(

@@ -28,7 +28,7 @@ export default function ExperimentRedirect() {
         <EmptyState
           icon={<AlertTriangle className="h-8 w-8" />}
           title="找不到这个实验"
-          subtitle="它可能已被删除,或者网络暂时不可用。"
+          subtitle="它可能已被删除，或者网络暂时不可用。"
           action={
             <button
               className="text-sm text-primary hover:underline"
